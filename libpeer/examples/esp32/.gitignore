@@ -1,0 +1,6 @@
+components/srtp
+build
+dependencies.lock
+managed_components
+sdkconfig
+sdkconfig.old
