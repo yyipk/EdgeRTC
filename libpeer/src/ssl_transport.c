@@ -15,23 +15,29 @@
 #include "utils.h"
 
 static int ssl_transport_mbedtls_recv_timeout(void* ctx, unsigned char* buf, size_t len, uint32_t timeout) {
+  NetworkContext_t* net_ctx = ctx;
   int ret;
   fd_set read_fds;
   struct timeval tv;
-  tv.tv_sec = timeout / 1000;
-  tv.tv_usec = (timeout % 1000) * 1000;
+  if (net_ctx->nonblocking) {
+    tv.tv_sec = 0;
+    tv.tv_usec = 0;
+  } else {
+    tv.tv_sec = timeout / 1000;
+    tv.tv_usec = (timeout % 1000) * 1000;
+  }
 
   FD_ZERO(&read_fds);
-  FD_SET(((TcpSocket*)ctx)->fd, &read_fds);
+  FD_SET(net_ctx->tcp_socket.fd, &read_fds);
 
-  ret = select(((TcpSocket*)ctx)->fd + 1, &read_fds, NULL, NULL, &tv);
+  ret = select(net_ctx->tcp_socket.fd + 1, &read_fds, NULL, NULL, &tv);
   if (ret < 0) {
     return -1;
   } else if (ret == 0) {
-    // timeout
+    return MBEDTLS_ERR_SSL_TIMEOUT;
   } else {
-    if (FD_ISSET(((TcpSocket*)ctx)->fd, &read_fds)) {
-      ret = tcp_socket_recv((TcpSocket*)ctx, buf, len);
+    if (FD_ISSET(net_ctx->tcp_socket.fd, &read_fds)) {
+      ret = tcp_socket_recv(&net_ctx->tcp_socket, buf, len);
     }
   }
 
@@ -39,7 +45,8 @@ static int ssl_transport_mbedtls_recv_timeout(void* ctx, unsigned char* buf, siz
 }
 
 static int ssl_transport_mbedlts_send(void* ctx, const uint8_t* buf, size_t len) {
-  return tcp_socket_send((TcpSocket*)ctx, buf, len);
+  NetworkContext_t* net_ctx = ctx;
+  return tcp_socket_send(&net_ctx->tcp_socket, buf, len);
 }
 
 int ssl_transport_connect(NetworkContext_t* net_ctx,
@@ -50,6 +57,8 @@ int ssl_transport_connect(NetworkContext_t* net_ctx,
   int ret;
   Address resolved_addr;
 
+  net_ctx->tcp_socket.fd = -1;
+  net_ctx->nonblocking = 0;
   mbedtls_ssl_init(&net_ctx->ssl);
   mbedtls_ssl_config_init(&net_ctx->conf);
   // mbedtls_x509_crt_init(&net_ctx->cacert);
@@ -58,7 +67,7 @@ int ssl_transport_connect(NetworkContext_t* net_ctx,
 
   if ((ret = mbedtls_ctr_drbg_seed(&net_ctx->ctr_drbg, mbedtls_entropy_func, &net_ctx->entropy,
                                    (const unsigned char*)pers, strlen(pers))) != 0) {
-    return -1;
+    goto fail;
   }
 
   if ((ret = mbedtls_ssl_config_defaults(&net_ctx->conf,
@@ -66,7 +75,7 @@ int ssl_transport_connect(NetworkContext_t* net_ctx,
                                          MBEDTLS_SSL_TRANSPORT_STREAM,
                                          MBEDTLS_SSL_PRESET_DEFAULT)) != 0) {
     LOGE("ssl config error: -0x%x", (unsigned int)-ret);
-    return -1;
+    goto fail;
   }
 
   mbedtls_ssl_conf_authmode(&net_ctx->conf, MBEDTLS_SSL_VERIFY_OPTIONAL);
@@ -83,24 +92,26 @@ int ssl_transport_connect(NetworkContext_t* net_ctx,
 
   if ((ret = mbedtls_ssl_setup(&net_ctx->ssl, &net_ctx->conf)) != 0) {
     LOGE("ssl setup error: -0x%x", (unsigned int)-ret);
-    return -1;
+    goto fail;
   }
 
   if ((ret = mbedtls_ssl_set_hostname(&net_ctx->ssl, host)) != 0) {
     LOGE("ssl set hostname error: -0x%x", (unsigned int)-ret);
-    return -1;
+    goto fail;
   }
 
   memset(&resolved_addr, 0, sizeof(resolved_addr));
-  tcp_socket_open(&net_ctx->tcp_socket, AF_INET);
-  ports_resolve_addr(host, &resolved_addr);
+  if (tcp_socket_open(&net_ctx->tcp_socket, AF_INET) < 0 ||
+      ports_resolve_addr(host, &resolved_addr) < 0) {
+    goto fail;
+  }
   addr_set_port(&resolved_addr, port);
-  if ((ret = tcp_socket_connect(&net_ctx->tcp_socket, &resolved_addr) < 0)) {
-    return -1;
+  if (tcp_socket_connect(&net_ctx->tcp_socket, &resolved_addr) < 0) {
+    goto fail;
   }
 
   mbedtls_ssl_conf_read_timeout(&net_ctx->conf, CONFIG_TLS_READ_TIMEOUT);
-  mbedtls_ssl_set_bio(&net_ctx->ssl, &net_ctx->tcp_socket,
+  mbedtls_ssl_set_bio(&net_ctx->ssl, net_ctx,
                       ssl_transport_mbedlts_send, NULL, ssl_transport_mbedtls_recv_timeout);
 
   LOGI("start to handshake");
@@ -108,11 +119,16 @@ int ssl_transport_connect(NetworkContext_t* net_ctx,
   while ((ret = mbedtls_ssl_handshake(&net_ctx->ssl)) != 0) {
     if (ret != MBEDTLS_ERR_SSL_WANT_READ && ret != MBEDTLS_ERR_SSL_WANT_WRITE) {
       LOGE("ssl handshake error: -0x%x", (unsigned int)-ret);
+      goto fail;
     }
   }
 
   LOGI("handshake success");
   return 0;
+
+fail:
+  ssl_transport_disconnect(net_ctx);
+  return -1;
 }
 
 void ssl_transport_disconnect(NetworkContext_t* net_ctx) {
@@ -125,11 +141,23 @@ void ssl_transport_disconnect(NetworkContext_t* net_ctx) {
   tcp_socket_close(&net_ctx->tcp_socket);
 }
 
+void ssl_transport_set_nonblocking(NetworkContext_t* net_ctx, int nonblocking) {
+  net_ctx->nonblocking = nonblocking;
+}
+
 int32_t ssl_transport_recv(NetworkContext_t* net_ctx, void* buf, size_t len) {
   int ret;
   memset(buf, 0, len);
   ret = mbedtls_ssl_read(&net_ctx->ssl, buf, len);
 
+  if (ret == MBEDTLS_ERR_SSL_TIMEOUT ||
+      ret == MBEDTLS_ERR_SSL_WANT_READ ||
+      ret == MBEDTLS_ERR_SSL_WANT_WRITE) {
+    return 0;
+  }
+  if (ret == 0) {
+    return -1;
+  }
   return ret;
 }
 

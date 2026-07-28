@@ -18,6 +18,7 @@ struct NetworkContext {
   mbedtls_ctr_drbg_context ctr_drbg;
   mbedtls_ssl_config conf;
   mbedtls_x509_crt cacert;
+  int nonblocking;
 };
 
 int ssl_transport_connect(NetworkContext_t* net_ctx,
@@ -26,6 +27,8 @@ int ssl_transport_connect(NetworkContext_t* net_ctx,
                           const char* cacert);
 
 void ssl_transport_disconnect(NetworkContext_t* net_ctx);
+
+void ssl_transport_set_nonblocking(NetworkContext_t* net_ctx, int nonblocking);
 
 int32_t ssl_transport_recv(NetworkContext_t* net_ctx, void* buf, size_t len);
 
