@@ -99,3 +99,7 @@ WebRtcAecm_Free(aecmInst);
 3. 对于实时应用，建议使用固定的帧大小
 4. 在初始化后，需要先处理几帧远端信号才能开始回声消除
 
+## 许可证
+
+本目录中的 WebRTC 项目源码遵循 BSD-style 许可证及附加专利授权，详见
+[`LICENSE`](LICENSE) 和 [`PATENTS`](PATENTS)。

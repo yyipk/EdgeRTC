@@ -63,5 +63,6 @@ EdgeRTC is based on [libpeer](https://github.com/sepfy/libpeer). Local changes
 from the upstream baseline are recorded in
 [`libpeer/MODIFICATIONS.md`](libpeer/MODIFICATIONS.md).
 
-libpeer and each bundled dependency retain their respective licenses. See the
+Original EdgeRTC code is available under the [MIT License](LICENSE). libpeer,
+AEC4, and each bundled dependency retain their respective licenses. See the
 license files in those directories before redistribution.

@@ -58,4 +58,5 @@ cmake --build build
 EdgeRTC 基于 [libpeer](https://github.com/sepfy/libpeer) 开发。相对上游基线的
 修改记录在 [`libpeer/MODIFICATIONS.md`](libpeer/MODIFICATIONS.md) 中。
 
-libpeer 和各项依赖保留各自的许可证，分发前请检查对应目录中的许可证文件。
+EdgeRTC 自有代码采用 [MIT License](LICENSE)。libpeer、AEC4 和各项依赖保留
+各自的许可证，分发前请检查对应目录中的许可证文件。
