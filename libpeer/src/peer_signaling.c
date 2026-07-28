@@ -42,8 +42,10 @@ typedef struct PeerSignaling {
   TransportInterface_t transport;
   NetworkContext_t net_ctx;
 
-  uint8_t mqtt_buf[CONFIG_MQTT_BUFFER_SIZE];
-  uint8_t http_buf[CONFIG_HTTP_BUFFER_SIZE];
+  union {
+    uint8_t mqtt[CONFIG_MQTT_BUFFER_SIZE];
+    uint8_t http[CONFIG_HTTP_BUFFER_SIZE];
+  } buffer;
 
   char subtopic[TOPIC_MAX_LEN];
   char pubtopic[TOPIC_MAX_LEN];
@@ -273,8 +275,8 @@ HTTPResponse_t peer_signaling_http_request(const TransportInterface_t* transport
   request_info.pathLen = path_len;
   request_info.reqFlags = HTTP_REQUEST_KEEP_ALIVE_FLAG;
 
-  request_headers.pBuffer = g_ps.http_buf;
-  request_headers.bufferLen = sizeof(g_ps.http_buf);
+  request_headers.pBuffer = g_ps.buffer.http;
+  request_headers.bufferLen = sizeof(g_ps.buffer.http);
 
   status = HTTPClient_InitializeRequestHeaders(&request_headers, &request_info);
 
@@ -287,8 +289,8 @@ HTTPResponse_t peer_signaling_http_request(const TransportInterface_t* transport
                            "Authorization", strlen("Authorization"), auth, auth_len);
     }
 
-    response.pBuffer = g_ps.http_buf;
-    response.bufferLen = sizeof(g_ps.http_buf);
+    response.pBuffer = g_ps.buffer.http;
+    response.bufferLen = sizeof(g_ps.buffer.http);
 
     status = HTTPClient_Send(transport_interface,
                              &request_headers, (uint8_t*)body, body ? body_len : 0, &response, 0);
@@ -401,8 +403,8 @@ static int peer_signaling_mqtt_connect(const char* hostname, int port) {
   g_ps.transport.recv = ssl_transport_recv;
   g_ps.transport.send = ssl_transport_send;
   g_ps.transport.pNetworkContext = &g_ps.net_ctx;
-  g_ps.mqtt_fixed_buf.pBuffer = g_ps.mqtt_buf;
-  g_ps.mqtt_fixed_buf.size = sizeof(g_ps.mqtt_buf);
+  g_ps.mqtt_fixed_buf.pBuffer = g_ps.buffer.mqtt;
+  g_ps.mqtt_fixed_buf.size = sizeof(g_ps.buffer.mqtt);
   status = MQTT_Init(&g_ps.mqtt_ctx, &g_ps.transport,
                      ports_get_epoch_time, peer_signaling_mqtt_event_cb, &g_ps.mqtt_fixed_buf);
 
