@@ -515,6 +515,7 @@ static void peer_signaling_onicecandidate(char* description, void* userdata) {
 }
 
 int peer_signaling_connect(const char* url, const char* token, PeerConnection* pc) {
+  uint8_t mac[6];
   char* client_id;
   int ret = 0;
 
@@ -532,8 +533,15 @@ int peer_signaling_connect(const char* url, const char* token, PeerConnection* p
 
   switch (g_ps.proto) {
     case 0: {  // MQTT
-      client_id = strrchr(g_ps.path, '/');
-      snprintf(g_ps.client_id, sizeof(g_ps.client_id), "%s", client_id + 1);
+      if (ports_get_mac_addr(mac) > 0) {
+        snprintf(g_ps.client_id, sizeof(g_ps.client_id),
+                 "bsm-%02x%02x%02x%02x%02x%02x",
+                 mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+      } else {
+        client_id = strrchr(g_ps.path, '/');
+        snprintf(g_ps.client_id, sizeof(g_ps.client_id), "%s", client_id + 1);
+      }
+      LOGI("MQTT client ID: %s", g_ps.client_id);
       snprintf(g_ps.subtopic, sizeof(g_ps.subtopic), "%s/invoke", g_ps.path);
       snprintf(g_ps.pubtopic, sizeof(g_ps.pubtopic), "%s/result", g_ps.path);
       ret = peer_signaling_mqtt_connect(g_ps.host, g_ps.port);

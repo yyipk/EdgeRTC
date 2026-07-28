@@ -21,6 +21,23 @@
 #include "ports.h"
 #include "utils.h"
 
+int ports_get_mac_addr(uint8_t mac[6]) {
+#if CONFIG_USE_LWIP
+  struct netif* netif;
+
+  for (netif = netif_list; netif != NULL; netif = netif->next) {
+    if (netif_is_up(netif) && !ip_addr_isany(&netif->ip_addr) &&
+        netif->hwaddr_len >= 6) {
+      memcpy(mac, netif->hwaddr, 6);
+      return 1;
+    }
+  }
+#else
+  (void)mac;
+#endif
+  return -1;
+}
+
 int ports_get_host_addr(Address* addr, const char* iface_prefix) {
   int ret = 0;
 
