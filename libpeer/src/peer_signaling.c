@@ -61,6 +61,7 @@ typedef struct PeerSignaling {
   char client_id[32];
 
   PeerConnection* pc;
+  int connected;
 
 } PeerSignaling;
 
@@ -402,6 +403,7 @@ static int peer_signaling_mqtt_connect(const char* hostname, int port) {
   char username[TOKEN_MAX_LEN] = {0};
   char password[TOKEN_MAX_LEN] = {0};
 
+  g_ps.connected = 0;
   if (ssl_transport_connect(&g_ps.net_ctx, hostname, port, NULL) < 0) {
     LOGE("ssl transport connect failed");
     return -1;
@@ -414,6 +416,11 @@ static int peer_signaling_mqtt_connect(const char* hostname, int port) {
   g_ps.mqtt_fixed_buf.size = sizeof(g_ps.buffer.mqtt);
   status = MQTT_Init(&g_ps.mqtt_ctx, &g_ps.transport,
                      ports_get_epoch_time, peer_signaling_mqtt_event_cb, &g_ps.mqtt_fixed_buf);
+  if (status != MQTTSuccess) {
+    LOGE("MQTT_Init failed: Status=%s.", MQTT_Status_strerror(status));
+    ssl_transport_disconnect(&g_ps.net_ctx);
+    return -1;
+  }
 
   memset(&conn_info, 0, sizeof(conn_info));
 
@@ -439,10 +446,12 @@ static int peer_signaling_mqtt_connect(const char* hostname, int port) {
 
   if (status != MQTTSuccess) {
     LOGE("MQTT_Connect failed: Status=%s.", MQTT_Status_strerror(status));
+    ssl_transport_disconnect(&g_ps.net_ctx);
     return -1;
   }
 
   LOGI("MQTT_Connect succeeded.");
+  g_ps.connected = 1;
   return 0;
 }
 
@@ -507,9 +516,11 @@ static void peer_signaling_onicecandidate(char* description, void* userdata) {
 
 int peer_signaling_connect(const char* url, const char* token, PeerConnection* pc) {
   char* client_id;
+  int ret = 0;
 
   if ((g_ps.proto = peer_signaling_resolve_url(url, g_ps.host, &g_ps.port, g_ps.path)) < 0) {
     LOGE("Resolve URL failed");
+    return -1;
   }
 
   if (token && strlen(token) > 0) {
@@ -525,8 +536,15 @@ int peer_signaling_connect(const char* url, const char* token, PeerConnection* p
       snprintf(g_ps.client_id, sizeof(g_ps.client_id), "%s", client_id + 1);
       snprintf(g_ps.subtopic, sizeof(g_ps.subtopic), "%s/invoke", g_ps.path);
       snprintf(g_ps.pubtopic, sizeof(g_ps.pubtopic), "%s/result", g_ps.path);
-      if (peer_signaling_mqtt_connect(g_ps.host, g_ps.port) == 0) {
-        peer_signaling_mqtt_subscribe(1);
+      ret = peer_signaling_mqtt_connect(g_ps.host, g_ps.port);
+      if (ret == 0) {
+        ret = peer_signaling_mqtt_subscribe(1);
+        if (ret < 0) {
+          ssl_transport_disconnect(&g_ps.net_ctx);
+          g_ps.connected = 0;
+        } else {
+          ssl_transport_set_nonblocking(&g_ps.net_ctx, 1);
+        }
       }
     } break;
     case 1: {  // HTTP
@@ -536,25 +554,39 @@ int peer_signaling_connect(const char* url, const char* token, PeerConnection* p
     } break;
   }
 
-  return 0;
+  return ret;
 }
 
 void peer_signaling_disconnect() {
   MQTTStatus_t status = MQTTSuccess;
 
-  if (!g_ps.proto && !peer_signaling_mqtt_subscribe(0)) {
-    status = MQTT_Disconnect(&g_ps.mqtt_ctx);
-    if (status != MQTTSuccess) {
-      LOGE("Failed to disconnect with broker: %s", MQTT_Status_strerror(status));
+  if (!g_ps.proto && g_ps.connected) {
+    if (!peer_signaling_mqtt_subscribe(0)) {
+      status = MQTT_Disconnect(&g_ps.mqtt_ctx);
+      if (status != MQTTSuccess) {
+        LOGE("Failed to disconnect with broker: %s", MQTT_Status_strerror(status));
+      }
     }
 
     ssl_transport_disconnect(&g_ps.net_ctx);
+    g_ps.connected = 0;
   }
+  g_ps.pc = NULL;
   LOGI("Disconnected");
 }
 
 int peer_signaling_loop() {
-  MQTT_ProcessLoop(&g_ps.mqtt_ctx);
+  MQTTStatus_t status;
+
+  if (g_ps.proto || !g_ps.connected) {
+    return g_ps.proto ? 0 : -1;
+  }
+
+  status = MQTT_ProcessLoop(&g_ps.mqtt_ctx);
+  if (status != MQTTSuccess) {
+    LOGE("MQTT_ProcessLoop failed: Status=%s.", MQTT_Status_strerror(status));
+    return -1;
+  }
   return 0;
 }
 #endif  // DISABLE_PEER_SIGNALING
