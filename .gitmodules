@@ -1,0 +1,18 @@
+[submodule "cJSON"]
+	path = cJSON
+	url = https://github.com/DaveGamble/cJSON.git
+[submodule "coreHTTP"]
+	path = coreHTTP
+	url = https://github.com/FreeRTOS/coreHTTP
+[submodule "coreMQTT"]
+	path = coreMQTT
+	url = https://github.com/FreeRTOS/coreMQTT
+[submodule "libsrtp"]
+	path = libsrtp
+	url = https://github.com/cisco/libsrtp.git
+[submodule "mbedtls"]
+	path = mbedtls
+	url = https://github.com/Mbed-TLS/mbedtls.git
+[submodule "usrsctp"]
+	path = usrsctp
+	url = https://github.com/sctplab/usrsctp.git
