@@ -69,7 +69,10 @@ struct Agent {
 
   int candidate_pairs_num;
   int use_candidate;
+  uint32_t conncheck_start_ms;
+  uint32_t conncheck_last_send_ms;
   uint32_t transaction_id[3];
+  uint32_t conncheck_transaction_id[3];
 };
 
 void agent_gather_candidate(Agent* agent, const char* urls, const char* username, const char* credential);
@@ -80,7 +83,7 @@ void agent_get_local_description(Agent* agent, char* description, int length);
 
 int agent_send(Agent* agent, const uint8_t* buf, int len);
 
-int agent_recv(Agent* agent, uint8_t* buf, int len);
+int agent_recv(Agent* agent, uint8_t* buf, int len, int* packet_consumed);
 
 void agent_set_remote_description(Agent* agent, char* description);
 

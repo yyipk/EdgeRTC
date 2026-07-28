@@ -52,6 +52,16 @@ struct IceCandidatePair {
   uint64_t priority;
 };
 
+static inline uint64_t ice_candidate_pair_rfc8445(uint32_t controlling_priority, uint32_t controlled_priority) {
+
+  uint32_t min_priority = controlling_priority < controlled_priority ? controlling_priority : controlled_priority;
+  uint32_t max_priority = controlling_priority > controlled_priority ? controlling_priority : controlled_priority;
+
+  return ((uint64_t)min_priority << 32) +
+         2 * (uint64_t)max_priority +
+         (controlling_priority > controlled_priority ? 1 : 0);
+}
+
 void ice_candidate_create(IceCandidate* ice_candidate, int foundation, IceCandidateType type, Address* addr);
 
 void ice_candidate_to_description(IceCandidate* candidate, char* description, int length);

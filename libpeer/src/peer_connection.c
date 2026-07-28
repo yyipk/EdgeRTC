@@ -65,7 +65,7 @@ static int peer_connection_dtls_srtp_recv(void* ctx, unsigned char* buf, size_t 
   }
 
   while (recv_max < CONFIG_TLS_READ_TIMEOUT && pc->state == PEER_CONNECTION_CONNECTED) {
-    ret = agent_recv(&pc->agent, buf, len);
+    ret = agent_recv(&pc->agent, buf, len, NULL);
 
     if (ret > 0) {
       break;
@@ -316,7 +316,8 @@ int peer_connection_loop(PeerConnection* pc) {
       }
       break;
     case PEER_CONNECTION_COMPLETED:
-      if ((pc->agent_ret = agent_recv(&pc->agent, pc->agent_buf, sizeof(pc->agent_buf))) > 0) {
+      if ((pc->agent_ret = agent_recv(&pc->agent, pc->agent_buf,
+                                      sizeof(pc->agent_buf), NULL)) > 0) {
         LOGD("agent_recv %d", pc->agent_ret);
 
         if (rtcp_probe(pc->agent_buf, pc->agent_ret)) {
