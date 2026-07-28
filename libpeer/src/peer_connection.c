@@ -18,6 +18,7 @@
     pc->oniceconnectionstatechange(curr_state, pc->config.user_data); \
     pc->state = curr_state;                                           \
   }
+#define PEER_CONNECTION_RECV_BUDGET 16
 
 struct PeerConnection {
   PeerConfiguration config;
@@ -286,6 +287,8 @@ static char* peer_connection_dtls_role_setup_value(DtlsSrtpRole d) {
 
 int peer_connection_loop(PeerConnection* pc) {
   uint32_t ssrc = 0;
+  int packet_consumed;
+  int packet_count;
   memset(pc->agent_buf, 0, sizeof(pc->agent_buf));
   pc->agent_ret = -1;
 
@@ -316,37 +319,44 @@ int peer_connection_loop(PeerConnection* pc) {
       }
       break;
     case PEER_CONNECTION_COMPLETED:
-      if ((pc->agent_ret = agent_recv(&pc->agent, pc->agent_buf,
-                                      sizeof(pc->agent_buf), NULL)) > 0) {
-        LOGD("agent_recv %d", pc->agent_ret);
+      for (packet_count = 0; packet_count < PEER_CONNECTION_RECV_BUDGET; packet_count++) {
+        packet_consumed = 0;
+        pc->agent_ret = agent_recv(&pc->agent, pc->agent_buf,
+                                   sizeof(pc->agent_buf), &packet_consumed);
+        if (pc->agent_ret > 0) {
+          LOGD("agent_recv %d", pc->agent_ret);
 
-        if (rtcp_probe(pc->agent_buf, pc->agent_ret)) {
-          LOGD("Got RTCP packet");
-          dtls_srtp_decrypt_rtcp_packet(&pc->dtls_srtp, pc->agent_buf, &pc->agent_ret);
-          peer_connection_incoming_rtcp(pc, pc->agent_buf, pc->agent_ret);
+          if (rtcp_probe(pc->agent_buf, pc->agent_ret)) {
+            LOGD("Got RTCP packet");
+            dtls_srtp_decrypt_rtcp_packet(&pc->dtls_srtp, pc->agent_buf, &pc->agent_ret);
+            peer_connection_incoming_rtcp(pc, pc->agent_buf, pc->agent_ret);
 
-        } else if (dtls_srtp_probe(pc->agent_buf)) {
-          int ret = dtls_srtp_read(&pc->dtls_srtp, pc->temp_buf, sizeof(pc->temp_buf));
-          LOGD("Got DTLS data %d", ret);
+          } else if (dtls_srtp_probe(pc->agent_buf)) {
+            int ret = dtls_srtp_read(&pc->dtls_srtp, pc->temp_buf, sizeof(pc->temp_buf));
+            LOGD("Got DTLS data %d", ret);
 
-          if (ret > 0) {
-            sctp_incoming_data(&pc->sctp, (char*)pc->temp_buf, ret);
+            if (ret > 0) {
+              sctp_incoming_data(&pc->sctp, (char*)pc->temp_buf, ret);
+            }
+
+          } else if (rtp_packet_validate(pc->agent_buf, pc->agent_ret)) {
+            LOGD("Got RTP packet");
+
+            dtls_srtp_decrypt_rtp_packet(&pc->dtls_srtp, pc->agent_buf, &pc->agent_ret);
+
+            ssrc = rtp_get_ssrc(pc->agent_buf);
+            if (ssrc == pc->remote_assrc) {
+              rtp_decoder_decode(&pc->artp_decoder, pc->agent_buf, pc->agent_ret);
+            } else if (ssrc == pc->remote_vssrc) {
+              rtp_decoder_decode(&pc->vrtp_decoder, pc->agent_buf, pc->agent_ret);
+            }
+
+          } else {
+            LOGW("Unknown data");
           }
-
-        } else if (rtp_packet_validate(pc->agent_buf, pc->agent_ret)) {
-          LOGD("Got RTP packet");
-
-          dtls_srtp_decrypt_rtp_packet(&pc->dtls_srtp, pc->agent_buf, &pc->agent_ret);
-
-          ssrc = rtp_get_ssrc(pc->agent_buf);
-          if (ssrc == pc->remote_assrc) {
-            rtp_decoder_decode(&pc->artp_decoder, pc->agent_buf, pc->agent_ret);
-          } else if (ssrc == pc->remote_vssrc) {
-            rtp_decoder_decode(&pc->vrtp_decoder, pc->agent_buf, pc->agent_ret);
-          }
-
-        } else {
-          LOGW("Unknown data");
+        }
+        if (!packet_consumed) {
+          break;
         }
       }
 
