@@ -1,9 +1,12 @@
 # EdgeRTC
 
-EdgeRTC is a compact, high-performance WebRTC library for memory- and
-flash-constrained IoT and embedded devices. It is built on libpeer and keeps
-the protocol stack small enough for products that need real-time audio,
-video, or data communication without a browser-sized runtime.
+[中文介绍](README_zh-CN.md)
+
+EdgeRTC is a lightweight, high-performance WebRTC library for IoT and embedded
+devices, built on libpeer and focused on low RAM and flash usage and
+low-latency real-time audio, video, and data communication. It retains the
+core protocol capabilities required by device-side communication without the
+overhead of a browser-sized runtime.
 
 ## Design goals
 
