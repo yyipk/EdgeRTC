@@ -80,6 +80,10 @@ struct RtpDecoder {
   RtpPayloadType type;
   RtpOnPacket on_packet;
   int (*decode_func)(RtpDecoder* rtp_decoder, uint8_t* data, size_t size);
+  uint8_t* nalu_buffer;
+  size_t nalu_size;
+  size_t nalu_capacity;
+  int nalu_active;
   void* user_data;
 };
 
@@ -97,11 +101,17 @@ struct RtpEncoder {
 
 int rtp_packet_validate(uint8_t* packet, size_t size);
 
-void rtp_encoder_init(RtpEncoder* rtp_encoder, MediaCodec codec, RtpOnPacket on_packet, void* user_data);
+void rtp_encoder_init(RtpEncoder* rtp_encoder, MediaCodec codec,
+                      RtpOnPacket on_packet, void* user_data);
 
 int rtp_encoder_encode(RtpEncoder* rtp_encoder, const uint8_t* data, size_t size);
 
-void rtp_decoder_init(RtpDecoder* rtp_decoder, MediaCodec codec, RtpOnPacket on_packet, void* user_data);
+void rtp_decoder_init(RtpDecoder* rtp_decoder, MediaCodec codec,
+                      RtpOnPacket on_packet, void* user_data);
+
+void rtp_decoder_reset(RtpDecoder* rtp_decoder);
+
+void rtp_decoder_deinit(RtpDecoder* rtp_decoder);
 
 int rtp_decoder_decode(RtpDecoder* rtp_decoder, const uint8_t* data, size_t size);
 

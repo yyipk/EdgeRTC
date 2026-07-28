@@ -191,6 +191,8 @@ PeerConnection* peer_connection_create(PeerConfiguration* config) {
 
 void peer_connection_destroy(PeerConnection* pc) {
   if (pc) {
+    rtp_decoder_deinit(&pc->artp_decoder);
+    rtp_decoder_deinit(&pc->vrtp_decoder);
     sctp_destroy_association(&pc->sctp);
     dtls_srtp_deinit(&pc->dtls_srtp);
     agent_destroy(&pc->agent);
@@ -469,6 +471,10 @@ static const char* peer_connection_create_sdp(PeerConnection* pc, SdpType sdp_ty
       break;
     default:
       break;
+  }
+
+  if (pc->config.video_codec != CODEC_NONE) {
+    rtp_decoder_reset(&pc->vrtp_decoder);
   }
 
   if (pc->dtls_srtp.initialized) {
