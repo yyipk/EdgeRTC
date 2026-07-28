@@ -38,6 +38,7 @@ struct PeerConnection {
   uint8_t agent_buf[CONFIG_MTU];
   int agent_ret;
   int b_local_description_created;
+  int b_remote_answer_set;
 
   RtpEncoder artp_encoder;
   RtpEncoder vrtp_encoder;
@@ -389,6 +390,11 @@ void peer_connection_set_remote_description(PeerConnection* pc, const char* sdp,
   int is_update = 0;
   Agent* agent = &pc->agent;
 
+  if (type == SDP_TYPE_ANSWER && pc->b_remote_answer_set) {
+    LOGW("Ignoring additional remote answer");
+    return;
+  }
+
   while ((line = strstr(start, "\r\n"))) {
     line = strstr(start, "\r\n");
     strncpy(buf, start, line - start);
@@ -428,6 +434,7 @@ void peer_connection_set_remote_description(PeerConnection* pc, const char* sdp,
 
   agent_set_remote_description(&pc->agent, (char*)sdp);
   if (type == SDP_TYPE_ANSWER) {
+    pc->b_remote_answer_set = 1;
     agent_update_candidate_pairs(&pc->agent);
     STATE_CHANGED(pc, PEER_CONNECTION_CHECKING);
   }
@@ -447,6 +454,7 @@ static const char* peer_connection_create_sdp(PeerConnection* pc, SdpType sdp_ty
     case SDP_TYPE_OFFER:
       role = DTLS_SRTP_ROLE_SERVER;
       agent_clear_candidates(&pc->agent);
+      pc->b_remote_answer_set = 0;
       pc->agent.mode = AGENT_MODE_CONTROLLING;
       break;
     case SDP_TYPE_ANSWER:
