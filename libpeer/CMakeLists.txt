@@ -1,8 +1,63 @@
 cmake_minimum_required(VERSION 3.16)
 cmake_policy(VERSION 3.16)
 
-include(${CMAKE_CURRENT_LIST_DIR}/third_party/coreHTTP/httpFilePaths.cmake)
-include(${CMAKE_CURRENT_LIST_DIR}/third_party/coreMQTT/mqttFilePaths.cmake)
+if(COMMAND sdk_generate_library)
+  sdk_generate_library()
+
+  sdk_library_add_sources(
+    src/address.c
+    src/agent.c
+    src/base64.c
+    src/dtls_srtp.c
+    src/ice.c
+    src/mdns.c
+    src/peer.c
+    src/peer_connection.c
+    src/peer_signaling.c
+    src/ports.c
+    src/rtcp.c
+    src/rtp.c
+    src/sctp.c
+    src/sdp.c
+    src/socket.c
+    src/ssl_transport.c
+    src/stun.c
+    src/utils.c
+    ../coreHTTP/source/core_http_client.c
+    ../coreHTTP/source/dependency/3rdparty/llhttp/src/api.c
+    ../coreHTTP/source/dependency/3rdparty/llhttp/src/llhttp.c
+    ../coreHTTP/source/dependency/3rdparty/llhttp/src/http.c
+    ../coreMQTT/source/core_mqtt.c
+    ../coreMQTT/source/core_mqtt_state.c
+    ../coreMQTT/source/core_mqtt_serializer.c
+  )
+
+  sdk_add_include_directories(src)
+  sdk_add_include_directories(../coreHTTP/source/include)
+  sdk_add_include_directories(../coreHTTP/source/interface)
+  sdk_add_include_directories(../coreHTTP/source/dependency/3rdparty/llhttp/include)
+  sdk_add_include_directories(../coreMQTT/source/include)
+
+  set_source_files_properties(
+    src/base64.c
+    src/peer_signaling.c
+    PROPERTIES COMPILE_DEFINITIONS
+    "base64_encode=peer_base64_encode;base64_decode=peer_base64_decode"
+  )
+
+  sdk_add_compile_definitions(-D__BYTE_ORDER=__LITTLE_ENDIAN)
+  sdk_add_compile_definitions(-DCONFIG_USE_LWIP=1)
+  sdk_add_compile_definitions(-DCONFIG_USE_USRSCTP=0)
+  sdk_add_compile_definitions(-DCONFIG_MBEDTLS_2_X=1)
+  sdk_add_compile_definitions(-DCONFIG_AUDIO_BUFFER_SIZE=8096)
+  sdk_add_compile_definitions(-DCONFIG_DATA_BUFFER_SIZE=80960)
+  sdk_add_compile_definitions(-DHTTP_DO_NOT_USE_CUSTOM_CONFIG=1)
+  sdk_add_compile_definitions(-DMQTT_DO_NOT_USE_CUSTOM_CONFIG=1)
+  return()
+endif()
+
+include(${CMAKE_CURRENT_LIST_DIR}/../coreHTTP/httpFilePaths.cmake)
+include(${CMAKE_CURRENT_LIST_DIR}/../coreMQTT/mqttFilePaths.cmake)
 
 if (DEFINED ENV{IDF_PATH})
   file(GLOB ESP32_CODES "./src/*.c")
@@ -69,7 +124,7 @@ if(ENABLE_TESTS)
 endif()
 
 ExternalProject_Add(cjson
-  SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party/cJSON
+  SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../cJSON
   CMAKE_ARGS
     -DCMAKE_C_FLAGS="-fPIC"
     -DBUILD_SHARED_LIBS=off
@@ -79,7 +134,7 @@ ExternalProject_Add(cjson
 )
 
 ExternalProject_Add(mbedtls
-  SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party/mbedtls
+  SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../mbedtls
   CMAKE_ARGS
     -DCMAKE_C_FLAGS="-fPIC"
     -DENABLE_TESTING=off
@@ -87,12 +142,12 @@ ExternalProject_Add(mbedtls
     -DCMAKE_INSTALL_PREFIX=${CMAKE_BINARY_DIR}/dist
     -DCMAKE_TOOLCHAIN_FILE=${CMAKE_TOOLCHAIN_FILE}
 )
-file(READ ${CMAKE_CURRENT_SOURCE_DIR}/third_party/mbedtls/include/mbedtls/mbedtls_config.h INPUT_CONTENT)
+file(READ ${CMAKE_CURRENT_SOURCE_DIR}/../mbedtls/include/mbedtls/mbedtls_config.h INPUT_CONTENT)
 string(REPLACE "//#define MBEDTLS_SSL_DTLS_SRTP" "#define MBEDTLS_SSL_DTLS_SRTP" MODIFIED_CONTENT ${INPUT_CONTENT})
-file(WRITE ${CMAKE_CURRENT_SOURCE_DIR}/third_party/mbedtls/include/mbedtls/mbedtls_config.h ${MODIFIED_CONTENT})
+file(WRITE ${CMAKE_CURRENT_SOURCE_DIR}/../mbedtls/include/mbedtls/mbedtls_config.h ${MODIFIED_CONTENT})
 
 ExternalProject_Add(srtp2
-  SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party/libsrtp
+  SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../libsrtp
   CMAKE_ARGS
     -DCMAKE_C_FLAGS="-fPIC"
     -DTEST_APPS=off
@@ -101,7 +156,7 @@ ExternalProject_Add(srtp2
 )
 
 ExternalProject_Add(usrsctp
-  SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party/usrsctp
+  SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../usrsctp
   CMAKE_ARGS
     -DCMAKE_C_FLAGS="-fPIC"
     -Dsctp_build_programs=off
