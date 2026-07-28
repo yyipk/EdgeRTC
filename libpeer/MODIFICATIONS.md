@@ -24,6 +24,7 @@
 | `fix(dtls): release and rebuild session state safely` | Release SRTP, DTLS cookie, SCTP, and fingerprint state across reconnects. |
 | `fix(dtls): reassemble fragmented ClientHello records` | Reassemble fragmented DTLS ClientHello records before passing them to the TLS stack. |
 | `fix(signaling): ignore duplicate remote answers` | Prevent repeated answers from restarting an active negotiation. |
+| `feat(signaling): add device-to-device calls` | Address devices by MAC-derived ID and exchange session-scoped offer, answer, busy, and hangup messages without changing the browser RPC topics. |
 | `feat(rtp): expose packet metadata to media callbacks` | Deliver RTP sequence number, timestamp, and SSRC to audio and video callbacks. |
 | `fix(rtp): parse variable headers and rebuild H264 safely` | Parse CSRC, extension, and padding fields; add bounded STAP-A and FU-A handling with per-decoder state. |
 

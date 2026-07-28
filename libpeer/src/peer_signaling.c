@@ -1,7 +1,9 @@
 #ifndef DISABLE_PEER_SIGNALING
 #include <assert.h>
+#include <ctype.h>
 #include <cJSON.h>
 #include <string.h>
+#include <strings.h>
 #include <unistd.h>
 
 #include <core_http_client.h>
@@ -29,11 +31,26 @@
 #define RPC_METHOD_ANSWER "answer"
 #define RPC_METHOD_CLOSE "close"
 
+#define DEVICE_SIGNALING_VERSION 1
+#define DEVICE_SESSION_MAX_LEN 48
+#define DEVICE_TOPIC_SUFFIX "/device/%s/signal"
+
+#define DEVICE_MESSAGE_OFFER "offer"
+#define DEVICE_MESSAGE_ANSWER "answer"
+#define DEVICE_MESSAGE_BUSY "busy"
+#define DEVICE_MESSAGE_HANGUP "hangup"
+
 #define RPC_ERROR_PARSE_ERROR "{\"code\":-32700,\"message\":\"Parse error\"}"
 #define RPC_ERROR_INVALID_REQUEST "{\"code\":-32600,\"message\":\"Invalid Request\"}"
 #define RPC_ERROR_METHOD_NOT_FOUND "{\"code\":-32601,\"message\":\"Method not found\"}"
 #define RPC_ERROR_INVALID_PARAMS "{\"code\":-32602,\"message\":\"Invalid params\"}"
 #define RPC_ERROR_INTERNAL_ERROR "{\"code\":-32603,\"message\":\"Internal error\"}"
+
+typedef enum DevicePendingSdp {
+  DEVICE_PENDING_SDP_NONE = 0,
+  DEVICE_PENDING_SDP_OFFER,
+  DEVICE_PENDING_SDP_ANSWER,
+} DevicePendingSdp;
 
 typedef struct PeerSignaling {
   MQTTContext_t mqtt_ctx;
@@ -49,6 +66,7 @@ typedef struct PeerSignaling {
 
   char subtopic[TOPIC_MAX_LEN];
   char pubtopic[TOPIC_MAX_LEN];
+  char device_subtopic[TOPIC_MAX_LEN];
 
   uint16_t packet_id;
   int id;
@@ -59,6 +77,14 @@ typedef struct PeerSignaling {
   char path[PATH_MAX_LEN];
   char token[TOKEN_MAX_LEN];
   char client_id[32];
+  char device_id[PEER_SIGNALING_DEVICE_ID_SIZE];
+  char direct_peer_id[PEER_SIGNALING_DEVICE_ID_SIZE];
+  char direct_session[DEVICE_SESSION_MAX_LEN];
+  uint32_t direct_session_counter;
+  DevicePendingSdp direct_pending_sdp;
+  int direct_publish_status;
+  int direct_call_active;
+  int direct_call_outgoing;
 
   PeerConnection* pc;
   int connected;
@@ -66,6 +92,45 @@ typedef struct PeerSignaling {
 } PeerSignaling;
 
 static PeerSignaling g_ps = {0};
+
+static int peer_signaling_device_id_is_valid(const char* device_id) {
+  size_t i;
+
+  if (device_id == NULL || strlen(device_id) != PEER_SIGNALING_DEVICE_ID_LENGTH) {
+    return 0;
+  }
+  for (i = 0; i < PEER_SIGNALING_DEVICE_ID_LENGTH; i++) {
+    if (!isxdigit((unsigned char)device_id[i])) {
+      return 0;
+    }
+  }
+  return 1;
+}
+
+static void peer_signaling_copy_device_id(char* destination, const char* source) {
+  size_t i;
+
+  for (i = 0; i < PEER_SIGNALING_DEVICE_ID_LENGTH; i++) {
+    destination[i] = (char)tolower((unsigned char)source[i]);
+  }
+  destination[PEER_SIGNALING_DEVICE_ID_LENGTH] = '\0';
+}
+
+static int peer_signaling_state_can_negotiate(PeerConnectionState state) {
+  return state == PEER_CONNECTION_NEW ||
+         state == PEER_CONNECTION_DISCONNECTED ||
+         state == PEER_CONNECTION_FAILED ||
+         state == PEER_CONNECTION_CLOSED;
+}
+
+static void peer_signaling_clear_direct_call(void) {
+  memset(g_ps.direct_peer_id, 0, sizeof(g_ps.direct_peer_id));
+  memset(g_ps.direct_session, 0, sizeof(g_ps.direct_session));
+  g_ps.direct_pending_sdp = DEVICE_PENDING_SDP_NONE;
+  g_ps.direct_publish_status = 0;
+  g_ps.direct_call_active = 0;
+  g_ps.direct_call_outgoing = 0;
+}
 
 static int peer_signaling_resolve_token(const char* token, char* username, char* password) {
   char plaintext[TOKEN_MAX_LEN] = {0};
@@ -137,7 +202,9 @@ static int peer_signaling_resolve_url(const char* url, char* host, int* port, ch
   return proto;
 }
 
-static void peer_signaling_mqtt_publish(MQTTContext_t* mqtt_ctx, const char* message) {
+static int peer_signaling_mqtt_publish_to(MQTTContext_t* mqtt_ctx,
+                                          const char* topic,
+                                          const char* message) {
   MQTTStatus_t status;
   MQTTPublishInfo_t pub_info;
 
@@ -145,17 +212,61 @@ static void peer_signaling_mqtt_publish(MQTTContext_t* mqtt_ctx, const char* mes
 
   pub_info.qos = MQTTQoS0;
   pub_info.retain = false;
-  pub_info.pTopicName = g_ps.pubtopic;
-  pub_info.topicNameLength = strlen(g_ps.pubtopic);
+  pub_info.pTopicName = topic;
+  pub_info.topicNameLength = strlen(topic);
   pub_info.pPayload = message;
   pub_info.payloadLength = strlen(message);
 
   status = MQTT_Publish(mqtt_ctx, &pub_info, MQTT_GetPacketId(mqtt_ctx));
   if (status != MQTTSuccess) {
     LOGE("MQTT_Publish failed: Status=%s.", MQTT_Status_strerror(status));
+    return -1;
   } else {
     LOGD("MQTT_Publish succeeded.");
   }
+  return 0;
+}
+
+static void peer_signaling_mqtt_publish(MQTTContext_t* mqtt_ctx, const char* message) {
+  peer_signaling_mqtt_publish_to(mqtt_ctx, g_ps.pubtopic, message);
+}
+
+static int peer_signaling_publish_device_message(const char* device_id,
+                                                  const char* session,
+                                                  const char* type,
+                                                  const char* sdp) {
+  char topic[TOPIC_MAX_LEN];
+  char* payload = NULL;
+  cJSON* message = NULL;
+  int ret = -1;
+
+  if (!g_ps.connected || g_ps.proto != 0 ||
+      !peer_signaling_device_id_is_valid(device_id) ||
+      session == NULL || session[0] == '\0' || type == NULL ||
+      snprintf(topic, sizeof(topic), "%s" DEVICE_TOPIC_SUFFIX,
+               g_ps.path, device_id) >= (int)sizeof(topic)) {
+    return -1;
+  }
+
+  message = cJSON_CreateObject();
+  if (message == NULL) {
+    return -1;
+  }
+  cJSON_AddNumberToObject(message, "version", DEVICE_SIGNALING_VERSION);
+  cJSON_AddStringToObject(message, "session", session);
+  cJSON_AddStringToObject(message, "from", g_ps.device_id);
+  cJSON_AddStringToObject(message, "type", type);
+  if (sdp != NULL) {
+    cJSON_AddStringToObject(message, "sdp", sdp);
+  }
+
+  payload = cJSON_PrintUnformatted(message);
+  if (payload != NULL) {
+    ret = peer_signaling_mqtt_publish_to(&g_ps.mqtt_ctx, topic, payload);
+    free(payload);
+  }
+  cJSON_Delete(message);
+  return ret;
 }
 
 static void peer_signaling_on_pub_event(const char* msg, size_t size) {
@@ -198,6 +309,10 @@ static void peer_signaling_on_pub_event(const char* msg, size_t size) {
     }
 
     if (strcmp(item->valuestring, RPC_METHOD_OFFER) == 0) {
+      if (g_ps.direct_call_active) {
+        error = cJSON_CreateRaw(RPC_ERROR_INTERNAL_ERROR);
+        break;
+      }
       switch (state) {
         case PEER_CONNECTION_NEW:
         case PEER_CONNECTION_DISCONNECTED:
@@ -217,15 +332,23 @@ static void peer_signaling_on_pub_event(const char* msg, size_t size) {
         LOGW("Cannot find params");
         break;
       }
-
-      peer_connection_set_remote_description(g_ps.pc, item->valuestring, SDP_TYPE_ANSWER);
+      if (g_ps.direct_call_active) {
+        error = cJSON_CreateRaw(RPC_ERROR_INTERNAL_ERROR);
+      } else {
+        peer_connection_set_remote_description(g_ps.pc, item->valuestring,
+                                               SDP_TYPE_ANSWER);
+      }
 
     } else if (strcmp(item->valuestring, RPC_METHOD_STATE) == 0) {
       result = cJSON_CreateString(peer_connection_state_to_string(state));
 
     } else if (strcmp(item->valuestring, RPC_METHOD_CLOSE) == 0) {
-      peer_connection_close(g_ps.pc);
-      result = cJSON_CreateString("");
+      if (g_ps.direct_call_active) {
+        error = cJSON_CreateRaw(RPC_ERROR_INTERNAL_ERROR);
+      } else {
+        peer_connection_close(g_ps.pc);
+        result = cJSON_CreateString("");
+      }
 
     } else {
       error = cJSON_CreateRaw(RPC_ERROR_METHOD_NOT_FOUND);
@@ -257,6 +380,103 @@ static void peer_signaling_on_pub_event(const char* msg, size_t size) {
   if (req) {
     cJSON_Delete(req);
   }
+}
+
+static void peer_signaling_on_device_event(const char* msg, size_t size) {
+  cJSON* request;
+  cJSON* version;
+  cJSON* session;
+  cJSON* from;
+  cJSON* type;
+  cJSON* sdp;
+  PeerConnectionState state;
+
+  request = cJSON_ParseWithLength(msg, size);
+  if (request == NULL) {
+    LOGW("Invalid device signaling JSON");
+    return;
+  }
+
+  version = cJSON_GetObjectItem(request, "version");
+  session = cJSON_GetObjectItem(request, "session");
+  from = cJSON_GetObjectItem(request, "from");
+  type = cJSON_GetObjectItem(request, "type");
+  sdp = cJSON_GetObjectItem(request, "sdp");
+  if (!cJSON_IsNumber(version) || version->valueint != DEVICE_SIGNALING_VERSION ||
+      !cJSON_IsString(session) || session->valuestring[0] == '\0' ||
+      strlen(session->valuestring) >= sizeof(g_ps.direct_session) ||
+      !cJSON_IsString(from) ||
+      !peer_signaling_device_id_is_valid(from->valuestring) ||
+      strcasecmp(from->valuestring, g_ps.device_id) == 0 ||
+      !cJSON_IsString(type)) {
+    LOGW("Invalid device signaling message");
+    cJSON_Delete(request);
+    return;
+  }
+
+  state = peer_connection_get_state(g_ps.pc);
+  if (g_ps.direct_call_active &&
+      (state == PEER_CONNECTION_FAILED || state == PEER_CONNECTION_CLOSED)) {
+    peer_signaling_clear_direct_call();
+  }
+
+  if (strcmp(type->valuestring, DEVICE_MESSAGE_OFFER) == 0) {
+    if (!cJSON_IsString(sdp)) {
+      LOGW("Device offer has no SDP");
+    } else if (g_ps.direct_call_active ||
+               !peer_signaling_state_can_negotiate(state)) {
+      peer_signaling_publish_device_message(from->valuestring,
+                                            session->valuestring,
+                                            DEVICE_MESSAGE_BUSY, NULL);
+    } else {
+      peer_signaling_copy_device_id(g_ps.direct_peer_id, from->valuestring);
+      snprintf(g_ps.direct_session, sizeof(g_ps.direct_session), "%s",
+               session->valuestring);
+      g_ps.direct_call_active = 1;
+      g_ps.direct_call_outgoing = 0;
+      g_ps.direct_pending_sdp = DEVICE_PENDING_SDP_ANSWER;
+      g_ps.direct_publish_status = -1;
+      peer_connection_set_remote_description(g_ps.pc, sdp->valuestring,
+                                             SDP_TYPE_OFFER);
+      peer_connection_create_answer(g_ps.pc);
+      if (g_ps.direct_publish_status < 0) {
+        LOGE("Failed to publish device answer");
+        peer_connection_close(g_ps.pc);
+        peer_signaling_clear_direct_call();
+      } else {
+        LOGI("Accepted call from %s", g_ps.direct_peer_id);
+      }
+    }
+  } else if (strcmp(type->valuestring, DEVICE_MESSAGE_ANSWER) == 0) {
+    if (g_ps.direct_call_active && g_ps.direct_call_outgoing &&
+        strcmp(g_ps.direct_peer_id, from->valuestring) == 0 &&
+        strcmp(g_ps.direct_session, session->valuestring) == 0 &&
+        cJSON_IsString(sdp)) {
+      peer_connection_set_remote_description(g_ps.pc, sdp->valuestring,
+                                             SDP_TYPE_ANSWER);
+      LOGI("Received answer from %s", g_ps.direct_peer_id);
+    }
+  } else if (strcmp(type->valuestring, DEVICE_MESSAGE_BUSY) == 0) {
+    if (g_ps.direct_call_active && g_ps.direct_call_outgoing &&
+        strcmp(g_ps.direct_peer_id, from->valuestring) == 0 &&
+        strcmp(g_ps.direct_session, session->valuestring) == 0) {
+      LOGW("Device %s is busy", g_ps.direct_peer_id);
+      peer_connection_close(g_ps.pc);
+      peer_signaling_clear_direct_call();
+    }
+  } else if (strcmp(type->valuestring, DEVICE_MESSAGE_HANGUP) == 0) {
+    if (g_ps.direct_call_active &&
+        strcmp(g_ps.direct_peer_id, from->valuestring) == 0 &&
+        strcmp(g_ps.direct_session, session->valuestring) == 0) {
+      LOGI("Call ended by %s", g_ps.direct_peer_id);
+      peer_connection_close(g_ps.pc);
+      peer_signaling_clear_direct_call();
+    }
+  } else {
+    LOGW("Unsupported device signaling type");
+  }
+
+  cJSON_Delete(request);
 }
 
 HTTPResponse_t peer_signaling_http_request(const TransportInterface_t* transport_interface,
@@ -360,13 +580,22 @@ static void peer_signaling_mqtt_event_cb(MQTTContext_t* mqtt_ctx,
                                          MQTTDeserializedInfo_t* deserialized_info) {
   MQTTStatus_t status = MQTTSuccess;
   switch (packet_info->type) {
-    case MQTT_PACKET_TYPE_PUBLISH:
+    case MQTT_PACKET_TYPE_PUBLISH: {
+      MQTTPublishInfo_t* publish_info = deserialized_info->pPublishInfo;
+      size_t device_topic_length = strlen(g_ps.device_subtopic);
+
       LOGD("MQTT received message: %.*s",
-           deserialized_info->pPublishInfo->payloadLength,
-           (char*)deserialized_info->pPublishInfo->pPayload);
-      peer_signaling_on_pub_event(deserialized_info->pPublishInfo->pPayload,
-                                  deserialized_info->pPublishInfo->payloadLength);
-      break;
+           publish_info->payloadLength, (char*)publish_info->pPayload);
+      if (publish_info->topicNameLength == device_topic_length &&
+          memcmp(publish_info->pTopicName, g_ps.device_subtopic,
+                 device_topic_length) == 0) {
+        peer_signaling_on_device_event(publish_info->pPayload,
+                                       publish_info->payloadLength);
+      } else {
+        peer_signaling_on_pub_event(publish_info->pPayload,
+                                    publish_info->payloadLength);
+      }
+    } break;
     case MQTT_PACKET_TYPE_SUBACK: {
       size_t ncodes = 0;
       int i = 0;
@@ -424,7 +653,7 @@ static int peer_signaling_mqtt_connect(const char* hostname, int port) {
 
   memset(&conn_info, 0, sizeof(conn_info));
 
-  conn_info.cleanSession = false;
+  conn_info.cleanSession = true;
 
   if (strlen(g_ps.token) > 0) {
     peer_signaling_resolve_token(g_ps.token, username, password);
@@ -455,7 +684,8 @@ static int peer_signaling_mqtt_connect(const char* hostname, int port) {
   return 0;
 }
 
-static int peer_signaling_mqtt_subscribe(int subscribed) {
+static int peer_signaling_mqtt_subscribe_topic(const char* topic,
+                                                int subscribed) {
   MQTTStatus_t status = MQTTSuccess;
   MQTTSubscribeInfo_t sub_info;
 
@@ -463,13 +693,14 @@ static int peer_signaling_mqtt_subscribe(int subscribed) {
 
   memset(&sub_info, 0, sizeof(sub_info));
   sub_info.qos = MQTTQoS0;
-  sub_info.pTopicFilter = g_ps.subtopic;
-  sub_info.topicFilterLength = strlen(g_ps.subtopic);
+  sub_info.pTopicFilter = topic;
+  sub_info.topicFilterLength = strlen(topic);
 
   if (subscribed) {
-    LOGI("Subscribing topic %s", g_ps.subtopic);
+    LOGI("Subscribing topic %s", topic);
     status = MQTT_Subscribe(&g_ps.mqtt_ctx, &sub_info, 1, packet_id);
   } else {
+    LOGI("Unsubscribing topic %s", topic);
     status = MQTT_Unsubscribe(&g_ps.mqtt_ctx, &sub_info, 1, packet_id);
   }
   if (status != MQTTSuccess) {
@@ -490,7 +721,16 @@ static int peer_signaling_mqtt_subscribe(int subscribed) {
 static void peer_signaling_onicecandidate(char* description, void* userdata) {
   cJSON* res;
   char* payload;
-  if (g_ps.id > 0) {
+  if (g_ps.direct_pending_sdp != DEVICE_PENDING_SDP_NONE) {
+    const char* type = g_ps.direct_pending_sdp == DEVICE_PENDING_SDP_OFFER ?
+                       DEVICE_MESSAGE_OFFER : DEVICE_MESSAGE_ANSWER;
+
+    g_ps.direct_publish_status =
+        peer_signaling_publish_device_message(g_ps.direct_peer_id,
+                                              g_ps.direct_session,
+                                              type, description);
+    g_ps.direct_pending_sdp = DEVICE_PENDING_SDP_NONE;
+  } else if (g_ps.id > 0) {
     res = cJSON_CreateObject();
     cJSON_AddStringToObject(res, "jsonrpc", RPC_VERSION);
     cJSON_AddNumberToObject(res, "id", g_ps.id);
@@ -519,6 +759,10 @@ int peer_signaling_connect(const char* url, const char* token, PeerConnection* p
   char* client_id;
   int ret = 0;
 
+  peer_signaling_clear_direct_call();
+  memset(g_ps.device_id, 0, sizeof(g_ps.device_id));
+  memset(g_ps.device_subtopic, 0, sizeof(g_ps.device_subtopic));
+
   if ((g_ps.proto = peer_signaling_resolve_url(url, g_ps.host, &g_ps.port, g_ps.path)) < 0) {
     LOGE("Resolve URL failed");
     return -1;
@@ -537,6 +781,9 @@ int peer_signaling_connect(const char* url, const char* token, PeerConnection* p
         snprintf(g_ps.client_id, sizeof(g_ps.client_id),
                  "bsm-%02x%02x%02x%02x%02x%02x",
                  mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+        snprintf(g_ps.device_id, sizeof(g_ps.device_id),
+                 "%02x%02x%02x%02x%02x%02x",
+                 mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
       } else {
         client_id = strrchr(g_ps.path, '/');
         snprintf(g_ps.client_id, sizeof(g_ps.client_id), "%s", client_id + 1);
@@ -544,9 +791,25 @@ int peer_signaling_connect(const char* url, const char* token, PeerConnection* p
       LOGI("MQTT client ID: %s", g_ps.client_id);
       snprintf(g_ps.subtopic, sizeof(g_ps.subtopic), "%s/invoke", g_ps.path);
       snprintf(g_ps.pubtopic, sizeof(g_ps.pubtopic), "%s/result", g_ps.path);
+      if (g_ps.device_id[0] != '\0') {
+        if (snprintf(g_ps.device_subtopic, sizeof(g_ps.device_subtopic),
+                     "%s" DEVICE_TOPIC_SUFFIX,
+                     g_ps.path, g_ps.device_id) >=
+            (int)sizeof(g_ps.device_subtopic)) {
+          LOGE("Device signaling topic is too long");
+          return -1;
+        }
+        LOGI("Device signaling ID: %s", g_ps.device_id);
+      }
       ret = peer_signaling_mqtt_connect(g_ps.host, g_ps.port);
       if (ret == 0) {
-        ret = peer_signaling_mqtt_subscribe(1);
+        ret = peer_signaling_mqtt_subscribe_topic(g_ps.subtopic, 1);
+        if (ret == 0 && g_ps.device_subtopic[0] != '\0') {
+          ret = peer_signaling_mqtt_subscribe_topic(g_ps.device_subtopic, 1);
+          if (ret < 0) {
+            peer_signaling_mqtt_subscribe_topic(g_ps.subtopic, 0);
+          }
+        }
         if (ret < 0) {
           ssl_transport_disconnect(&g_ps.net_ctx);
           g_ps.connected = 0;
@@ -569,7 +832,10 @@ void peer_signaling_disconnect() {
   MQTTStatus_t status = MQTTSuccess;
 
   if (!g_ps.proto && g_ps.connected) {
-    if (!peer_signaling_mqtt_subscribe(0)) {
+    if (g_ps.device_subtopic[0] != '\0') {
+      peer_signaling_mqtt_subscribe_topic(g_ps.device_subtopic, 0);
+    }
+    if (!peer_signaling_mqtt_subscribe_topic(g_ps.subtopic, 0)) {
       status = MQTT_Disconnect(&g_ps.mqtt_ctx);
       if (status != MQTTSuccess) {
         LOGE("Failed to disconnect with broker: %s", MQTT_Status_strerror(status));
@@ -580,7 +846,73 @@ void peer_signaling_disconnect() {
     g_ps.connected = 0;
   }
   g_ps.pc = NULL;
+  peer_signaling_clear_direct_call();
   LOGI("Disconnected");
+}
+
+int peer_signaling_call(const char* device_id) {
+  PeerConnectionState state;
+
+  if (!g_ps.connected || g_ps.proto != 0 || g_ps.pc == NULL ||
+      !peer_signaling_device_id_is_valid(device_id) ||
+      g_ps.device_id[0] == '\0' ||
+      strcasecmp(device_id, g_ps.device_id) == 0) {
+    return -1;
+  }
+
+  state = peer_connection_get_state(g_ps.pc);
+  if (g_ps.direct_call_active ||
+      !peer_signaling_state_can_negotiate(state)) {
+    return -1;
+  }
+
+  peer_signaling_copy_device_id(g_ps.direct_peer_id, device_id);
+  g_ps.direct_session_counter++;
+  snprintf(g_ps.direct_session, sizeof(g_ps.direct_session),
+           "%s-%08lx-%lu", g_ps.device_id,
+           (unsigned long)ports_get_epoch_time(),
+           (unsigned long)g_ps.direct_session_counter);
+  g_ps.direct_call_active = 1;
+  g_ps.direct_call_outgoing = 1;
+  g_ps.direct_pending_sdp = DEVICE_PENDING_SDP_OFFER;
+  g_ps.direct_publish_status = -1;
+
+  peer_connection_create_offer(g_ps.pc);
+  if (g_ps.direct_publish_status < 0) {
+    LOGE("Failed to publish device offer");
+    peer_connection_close(g_ps.pc);
+    peer_signaling_clear_direct_call();
+    return -1;
+  }
+
+  LOGI("Calling device %s", g_ps.direct_peer_id);
+  return 0;
+}
+
+int peer_signaling_hangup() {
+  int ret;
+
+  if (!g_ps.direct_call_active || g_ps.pc == NULL) {
+    return -1;
+  }
+
+  ret = peer_signaling_publish_device_message(g_ps.direct_peer_id,
+                                              g_ps.direct_session,
+                                              DEVICE_MESSAGE_HANGUP, NULL);
+  peer_connection_close(g_ps.pc);
+  peer_signaling_clear_direct_call();
+  LOGI("Device call ended");
+  return ret;
+}
+
+int peer_signaling_get_device_id(char* device_id, size_t size) {
+  if (device_id == NULL || size < sizeof(g_ps.device_id) ||
+      !g_ps.connected || g_ps.device_id[0] == '\0') {
+    return -1;
+  }
+
+  memcpy(device_id, g_ps.device_id, sizeof(g_ps.device_id));
+  return 0;
 }
 
 int peer_signaling_loop() {
@@ -594,6 +926,11 @@ int peer_signaling_loop() {
   if (status != MQTTSuccess) {
     LOGE("MQTT_ProcessLoop failed: Status=%s.", MQTT_Status_strerror(status));
     return -1;
+  }
+  if (g_ps.direct_call_active &&
+      (peer_connection_get_state(g_ps.pc) == PEER_CONNECTION_FAILED ||
+       peer_connection_get_state(g_ps.pc) == PEER_CONNECTION_CLOSED)) {
+    peer_signaling_clear_direct_call();
   }
   return 0;
 }

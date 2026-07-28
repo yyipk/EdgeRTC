@@ -400,6 +400,16 @@ void peer_connection_set_remote_description(PeerConnection* pc, const char* sdp,
     LOGW("Ignoring additional remote answer");
     return;
   }
+  if (type == SDP_TYPE_OFFER &&
+      (pc->state == PEER_CONNECTION_NEW ||
+       pc->state == PEER_CONNECTION_DISCONNECTED ||
+       pc->state == PEER_CONNECTION_FAILED ||
+       pc->state == PEER_CONNECTION_CLOSED)) {
+    agent_clear_candidates(agent);
+    pc->remote_assrc = 0;
+    pc->remote_vssrc = 0;
+    pc->b_remote_answer_set = 0;
+  }
 
   while ((line = strstr(start, "\r\n"))) {
     line = strstr(start, "\r\n");
@@ -543,6 +553,7 @@ static const char* peer_connection_create_sdp(PeerConnection* pc, SdpType sdp_ty
 }
 
 const char* peer_connection_create_offer(PeerConnection* pc) {
+  STATE_CHANGED(pc, PEER_CONNECTION_NEW);
   return peer_connection_create_sdp(pc, SDP_TYPE_OFFER);
 }
 
