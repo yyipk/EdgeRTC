@@ -15,6 +15,167 @@
 #include "socket.h"
 #include "utils.h"
 
+#define DTLS_RECORD_HEADER_SIZE 13
+#define DTLS_HANDSHAKE_HEADER_SIZE 12
+#define DTLS_CLIENT_HELLO_HEADER_SIZE (DTLS_RECORD_HEADER_SIZE + DTLS_HANDSHAKE_HEADER_SIZE)
+#define DTLS_CONTENT_TYPE_HANDSHAKE 22
+#define DTLS_HANDSHAKE_TYPE_CLIENT_HELLO 1
+
+typedef struct DtlsClientHelloFragment {
+  uint16_t message_seq;
+  size_t message_length;
+  size_t fragment_offset;
+  size_t fragment_length;
+  const uint8_t* data;
+} DtlsClientHelloFragment;
+
+static size_t dtls_srtp_read_uint24(const uint8_t* data) {
+  return ((size_t)data[0] << 16) | ((size_t)data[1] << 8) | data[2];
+}
+
+static void dtls_srtp_write_uint24(uint8_t* data, size_t value) {
+  data[0] = (uint8_t)(value >> 16);
+  data[1] = (uint8_t)(value >> 8);
+  data[2] = (uint8_t)value;
+}
+
+static int dtls_srtp_parse_client_hello_fragment(const uint8_t* packet,
+                                                 size_t packet_length,
+                                                 DtlsClientHelloFragment* fragment) {
+  const uint8_t* handshake;
+  size_t record_length;
+
+  if (packet_length < DTLS_CLIENT_HELLO_HEADER_SIZE ||
+      packet[0] != DTLS_CONTENT_TYPE_HANDSHAKE ||
+      packet[3] != 0 || packet[4] != 0) {
+    return 0;
+  }
+
+  record_length = ((size_t)packet[11] << 8) | packet[12];
+  if (record_length < DTLS_HANDSHAKE_HEADER_SIZE ||
+      record_length + DTLS_RECORD_HEADER_SIZE > packet_length) {
+    return 0;
+  }
+
+  handshake = packet + DTLS_RECORD_HEADER_SIZE;
+  if (handshake[0] != DTLS_HANDSHAKE_TYPE_CLIENT_HELLO) {
+    return 0;
+  }
+
+  fragment->message_seq = ((uint16_t)handshake[4] << 8) | handshake[5];
+  fragment->message_length = dtls_srtp_read_uint24(handshake + 1);
+  fragment->fragment_offset = dtls_srtp_read_uint24(handshake + 6);
+  fragment->fragment_length = dtls_srtp_read_uint24(handshake + 9);
+  fragment->data = handshake + DTLS_HANDSHAKE_HEADER_SIZE;
+
+  if (record_length != DTLS_HANDSHAKE_HEADER_SIZE + fragment->fragment_length ||
+      fragment->fragment_offset > fragment->message_length ||
+      fragment->fragment_length > fragment->message_length - fragment->fragment_offset) {
+    return 0;
+  }
+
+  return 1;
+}
+
+static size_t dtls_srtp_copy_client_hello_fragment(uint8_t* message,
+                                                   uint8_t* received_map,
+                                                   const DtlsClientHelloFragment* fragment) {
+  size_t newly_received = 0;
+  size_t i;
+
+  for (i = 0; i < fragment->fragment_length; i++) {
+    size_t offset = fragment->fragment_offset + i;
+    uint8_t mask = (uint8_t)(1U << (offset & 7U));
+
+    message[offset] = fragment->data[i];
+    if ((received_map[offset >> 3] & mask) == 0) {
+      received_map[offset >> 3] |= mask;
+      newly_received++;
+    }
+  }
+
+  return newly_received;
+}
+
+static int dtls_srtp_mbedtls_recv(void* ctx, uint8_t* buf, size_t len) {
+  DtlsSrtp* dtls_srtp = (DtlsSrtp*)ctx;
+  DtlsClientHelloFragment fragment;
+  uint8_t* reassembled = NULL;
+  uint8_t* received_map = NULL;
+  size_t reassembled_length;
+  size_t received = 0;
+  unsigned int fragment_count = 0;
+  int have_zero_offset_fragment;
+  int ret;
+
+  ret = dtls_srtp->udp_recv(ctx, buf, len);
+  if (ret <= 0 || dtls_srtp->role != DTLS_SRTP_ROLE_SERVER ||
+      !dtls_srtp_parse_client_hello_fragment(buf, (size_t)ret, &fragment) ||
+      (fragment.fragment_offset == 0 && fragment.fragment_length == fragment.message_length)) {
+    return ret;
+  }
+
+  if (fragment.message_length > len - DTLS_CLIENT_HELLO_HEADER_SIZE) {
+    LOGE("Fragmented DTLS ClientHello is too large: %u", (unsigned int)fragment.message_length);
+    return MBEDTLS_ERR_SSL_BUFFER_TOO_SMALL;
+  }
+
+  reassembled_length = DTLS_CLIENT_HELLO_HEADER_SIZE + fragment.message_length;
+  reassembled = calloc(1, reassembled_length);
+  received_map = calloc(1, (fragment.message_length + 7) / 8);
+  if (reassembled == NULL || received_map == NULL) {
+    free(received_map);
+    free(reassembled);
+    return MBEDTLS_ERR_SSL_ALLOC_FAILED;
+  }
+
+  memcpy(reassembled, buf, DTLS_CLIENT_HELLO_HEADER_SIZE);
+  have_zero_offset_fragment = fragment.fragment_offset == 0;
+  LOGI("Reassembling fragmented DTLS ClientHello: seq=%u, total=%u",
+       fragment.message_seq, (unsigned int)fragment.message_length);
+
+  while (1) {
+    received += dtls_srtp_copy_client_hello_fragment(
+        reassembled + DTLS_CLIENT_HELLO_HEADER_SIZE, received_map, &fragment);
+    fragment_count++;
+    if (received == fragment.message_length) {
+      break;
+    }
+
+    ret = dtls_srtp->udp_recv(ctx, buf, len);
+    if (ret <= 0) {
+      goto exit;
+    }
+
+    DtlsClientHelloFragment next_fragment;
+    if (!dtls_srtp_parse_client_hello_fragment(buf, (size_t)ret, &next_fragment) ||
+        next_fragment.message_seq != fragment.message_seq ||
+        next_fragment.message_length != fragment.message_length) {
+      LOGE("Fragmented DTLS ClientHello was interrupted");
+      goto exit;
+    }
+    if (!have_zero_offset_fragment && next_fragment.fragment_offset == 0) {
+      memcpy(reassembled, buf, DTLS_CLIENT_HELLO_HEADER_SIZE);
+      have_zero_offset_fragment = 1;
+    }
+    fragment = next_fragment;
+  }
+
+  reassembled[11] = (uint8_t)((DTLS_HANDSHAKE_HEADER_SIZE + fragment.message_length) >> 8);
+  reassembled[12] = (uint8_t)(DTLS_HANDSHAKE_HEADER_SIZE + fragment.message_length);
+  memset(reassembled + DTLS_RECORD_HEADER_SIZE + 6, 0, 3);
+  dtls_srtp_write_uint24(reassembled + DTLS_RECORD_HEADER_SIZE + 9,
+                         fragment.message_length);
+  memcpy(buf, reassembled, reassembled_length);
+  ret = (int)reassembled_length;
+  LOGI("Reassembled DTLS ClientHello from %u fragments", fragment_count);
+
+exit:
+  free(received_map);
+  free(reassembled);
+  return ret;
+}
+
 int dtls_srtp_udp_send(void* ctx, const uint8_t* buf, size_t len) {
   DtlsSrtp* dtls_srtp = (DtlsSrtp*)ctx;
   UdpSocket* udp_socket = (UdpSocket*)dtls_srtp->user_data;
@@ -388,12 +549,18 @@ static int dtls_srtp_do_handshake(DtlsSrtp* dtls_srtp) {
   mbedtls_ssl_set_export_keys_cb(&dtls_srtp->ssl, dtls_srtp_key_derivation_cb, dtls_srtp);
 #endif
 
-  mbedtls_ssl_set_bio(&dtls_srtp->ssl, dtls_srtp, dtls_srtp->udp_send, dtls_srtp->udp_recv, NULL);
+  mbedtls_ssl_set_bio(&dtls_srtp->ssl, dtls_srtp, dtls_srtp->udp_send,
+                      dtls_srtp->role == DTLS_SRTP_ROLE_SERVER ?
+                          dtls_srtp_mbedtls_recv : dtls_srtp->udp_recv,
+                      NULL);
 
   do {
     ret = mbedtls_ssl_handshake(&dtls_srtp->ssl);
 
   } while (ret == MBEDTLS_ERR_SSL_WANT_READ || ret == MBEDTLS_ERR_SSL_WANT_WRITE);
+
+  mbedtls_ssl_set_bio(&dtls_srtp->ssl, dtls_srtp, dtls_srtp->udp_send,
+                      dtls_srtp->udp_recv, NULL);
 
   return ret;
 }
