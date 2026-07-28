@@ -38,6 +38,7 @@ typedef enum StunAttrType {
   STUN_ATTR_TYPE_MAPPED_ADDRESS = 0x0001,
   STUN_ATTR_TYPE_USERNAME = 0x0006,
   STUN_ATTR_TYPE_MESSAGE_INTEGRITY = 0x0008,
+  STUN_ATTR_TYPE_ERROR_CODE = 0x0009,
   STUN_ATTR_TYPE_LIFETIME = 0x000d,
   STUN_ATTR_TYPE_REALM = 0x0014,
   STUN_ATTR_TYPE_NONCE = 0x0015,
@@ -85,6 +86,11 @@ struct StunAttribute {
 struct StunMessage {
   StunClass stunclass;
   StunMethod stunmethod;
+  int error_code;
+  uint32_t priority;
+  int use_candidate;
+  int ice_controlled;
+  int ice_controlling;
   uint32_t fingerprint;
   char message_integrity[20];
   char username[128];

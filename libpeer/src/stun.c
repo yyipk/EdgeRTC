@@ -4,8 +4,17 @@
 #include <string.h>
 #include <unistd.h>
 
+#include "ports.h"
 #include "stun.h"
 #include "utils.h"
+
+static uint32_t stun_transaction_sequence;
+
+static uint32_t stun_create_transaction_word(void) {
+  stun_transaction_sequence += 0x9e3779b9U;
+  return ((uint32_t)rand() << 16) ^ (uint32_t)rand() ^
+         ports_get_epoch_time() ^ stun_transaction_sequence;
+}
 
 uint32_t CRC32_TABLE[256] = {
     0x00000000, 0x77073096, 0xee0e612c, 0x990951ba, 0x076dc419, 0x706af48f, 0xe963a535,
@@ -51,9 +60,9 @@ void stun_msg_create(StunMessage* msg, uint16_t type) {
   header->type = htons(type);
   header->length = 0;
   header->magic_cookie = htonl(MAGIC_COOKIE);
-  header->transaction_id[0] = htonl(CRC32_TABLE[1]);
-  header->transaction_id[1] = htonl(CRC32_TABLE[2]);
-  header->transaction_id[2] = htonl(CRC32_TABLE[3]);
+  header->transaction_id[0] = htonl(stun_create_transaction_word());
+  header->transaction_id[1] = htonl(stun_create_transaction_word());
+  header->transaction_id[2] = htonl(stun_create_transaction_word());
   msg->size = sizeof(StunHeader);
 }
 
@@ -132,6 +141,12 @@ void stun_parse_msg_buf(StunMessage* msg) {
 
   uint8_t mask[16];
 
+  msg->error_code = 0;
+  msg->priority = 0;
+  msg->use_candidate = 0;
+  msg->ice_controlled = 0;
+  msg->ice_controlling = 0;
+
   msg->stunclass = ntohs(header->type);
   if ((msg->stunclass & STUN_CLASS_ERROR) == STUN_CLASS_ERROR) {
     msg->stunclass = STUN_CLASS_ERROR;
@@ -175,6 +190,11 @@ void stun_parse_msg_buf(StunMessage* msg) {
         }
 
         break;
+      case STUN_ATTR_TYPE_ERROR_CODE:
+        if (ntohs(attr->length) >= 4) {
+          msg->error_code = (attr->value[2] & 0x07) * 100 + (uint8_t)attr->value[3];
+        }
+        break;
       case STUN_ATTR_TYPE_LIFETIME:
         break;
       case STUN_ATTR_TYPE_REALM:
@@ -198,17 +218,26 @@ void stun_parse_msg_buf(StunMessage* msg) {
         memcpy(mask + 4, header->transaction_id, sizeof(header->transaction_id));
         stun_get_mapped_address(attr->value, mask, &msg->mapped_addr);
         break;
-      case STUN_ATTR_TYPE_PRIORITY:
-        break;
+      case STUN_ATTR_TYPE_PRIORITY: {
+        uint32_t priority;
+        if (ntohs(attr->length) == sizeof(priority)) {
+          memcpy(&priority, attr->value, sizeof(priority));
+          msg->priority = ntohl(priority);
+        }
+      } break;
       case STUN_ATTR_TYPE_USE_CANDIDATE:
-        // LOGD("Use Candidate");
+        msg->use_candidate = 1;
         break;
       case STUN_ATTR_TYPE_FINGERPRINT:
         memcpy(&msg->fingerprint, attr->value, ntohs(attr->length));
         // LOGD("Fingerprint: 0x%.4x", msg->fingerprint);
         break;
       case STUN_ATTR_TYPE_ICE_CONTROLLED:
+        msg->ice_controlled = 1;
+        break;
       case STUN_ATTR_TYPE_ICE_CONTROLLING:
+        msg->ice_controlling = 1;
+        break;
       case STUN_ATTR_TYPE_NETWORK_COST:
         // Do nothing
         break;
