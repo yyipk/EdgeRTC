@@ -72,7 +72,9 @@ typedef struct RtpMap {
 
 typedef struct RtpEncoder RtpEncoder;
 typedef struct RtpDecoder RtpDecoder;
-typedef void (*RtpOnPacket)(uint8_t* packet, size_t bytes, void* user_data);
+typedef void (*RtpOnPacket)(uint8_t* packet, size_t bytes,
+                            const RtpPacketMetadata* metadata,
+                            void* user_data);
 
 struct RtpDecoder {
   RtpPayloadType type;

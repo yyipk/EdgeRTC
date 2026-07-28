@@ -69,6 +69,12 @@ typedef struct IceServer {
 
 } IceServer;
 
+typedef struct RtpPacketMetadata {
+  uint16_t sequence_number;
+  uint32_t timestamp;
+  uint32_t ssrc;
+} RtpPacketMetadata;
+
 typedef struct PeerConfiguration {
   IceServer ice_servers[5];
 
@@ -76,8 +82,12 @@ typedef struct PeerConfiguration {
   MediaCodec video_codec;
   DataChannelType datachannel;
 
-  void (*onaudiotrack)(uint8_t* data, size_t size, void* userdata);
-  void (*onvideotrack)(uint8_t* data, size_t size, void* userdata);
+  void (*onaudiotrack)(uint8_t* data, size_t size,
+                       const RtpPacketMetadata* metadata,
+                       void* userdata);
+  void (*onvideotrack)(uint8_t* data, size_t size,
+                       const RtpPacketMetadata* metadata,
+                       void* userdata);
   void (*on_request_keyframe)(void* userdata);
   void* user_data;
 

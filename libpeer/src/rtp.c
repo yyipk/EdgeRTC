@@ -66,7 +66,8 @@ static int rtp_encoder_encode_h264_single(RtpEncoder* rtp_encoder, uint8_t* buf,
 #endif
 
   memcpy(rtp_packet->payload, buf, size);
-  rtp_encoder->on_packet(rtp_encoder->buf, size + sizeof(RtpHeader), rtp_encoder->user_data);
+  rtp_encoder->on_packet(rtp_encoder->buf, size + sizeof(RtpHeader), NULL,
+                         rtp_encoder->user_data);
   return 0;
 }
 
@@ -107,14 +108,18 @@ static int rtp_encoder_encode_h264_fu_a(RtpEncoder* rtp_encoder, uint8_t* buf, s
       fu_header->e = 1;
       rtp_packet->header.markerbit = 1;
       memcpy(rtp_packet->payload + sizeof(NaluHeader) + sizeof(FuHeader), buf, size);
-      rtp_encoder->on_packet(rtp_encoder->buf, size + sizeof(RtpHeader) + sizeof(NaluHeader) + sizeof(FuHeader), rtp_encoder->user_data);
+      rtp_encoder->on_packet(rtp_encoder->buf,
+                             size + sizeof(RtpHeader) + sizeof(NaluHeader) +
+                                 sizeof(FuHeader),
+                             NULL, rtp_encoder->user_data);
       break;
     }
 
     fu_header->e = 0;
 
     memcpy(rtp_packet->payload + sizeof(NaluHeader) + sizeof(FuHeader), buf, FU_PAYLOAD_SIZE);
-    rtp_encoder->on_packet(rtp_encoder->buf, CONFIG_MTU, rtp_encoder->user_data);
+    rtp_encoder->on_packet(rtp_encoder->buf, CONFIG_MTU, NULL,
+                           rtp_encoder->user_data);
     size -= FU_PAYLOAD_SIZE;
     buf += FU_PAYLOAD_SIZE;
 
@@ -175,7 +180,8 @@ static int rtp_encoder_encode_generic(RtpEncoder* rtp_encoder, uint8_t* buf, siz
   rtp_header->ssrc = htonl(rtp_encoder->ssrc);
   memcpy(rtp_encoder->buf + sizeof(RtpHeader), buf, size);
 
-  rtp_encoder->on_packet(rtp_encoder->buf, size + sizeof(RtpHeader), rtp_encoder->user_data);
+  rtp_encoder->on_packet(rtp_encoder->buf, size + sizeof(RtpHeader), NULL,
+                         rtp_encoder->user_data);
 
   return 0;
 }
@@ -225,8 +231,13 @@ static int rtp_decode_h264(RtpDecoder* rtp_decoder, uint8_t* buf, size_t size) {
   static uint8_t nalu_buf[CONFIG_MAX_NALU_SIZE];
   static int offset = 0;
   RtpPacket* rtp_packet = (RtpPacket*)buf;
+  RtpPacketMetadata metadata;
   uint8_t nalu_type = *rtp_packet->payload & 0x1f;
   int payload_size = size - sizeof(RtpHeader);
+
+  metadata.sequence_number = ntohs(rtp_packet->header.seq_number);
+  metadata.timestamp = ntohl(rtp_packet->header.timestamp);
+  metadata.ssrc = ntohl(rtp_packet->header.ssrc);
   if (nalu_type > 0 && nalu_type < 24) {
     // NALU type 1-23 are single NALUs
     memcpy(nalu_buf, &nalu_start_4bytecode, sizeof(nalu_start_4bytecode));
@@ -234,7 +245,8 @@ static int rtp_decode_h264(RtpDecoder* rtp_decoder, uint8_t* buf, size_t size) {
     memcpy(nalu_buf + offset, rtp_packet->payload, payload_size);
     offset += payload_size;
     if (rtp_decoder->on_packet != NULL) {
-      rtp_decoder->on_packet(nalu_buf, offset, rtp_decoder->user_data);
+      rtp_decoder->on_packet(nalu_buf, offset, &metadata,
+                             rtp_decoder->user_data);
     }
     return (int)size;
   } else {
@@ -257,7 +269,8 @@ static int rtp_decode_h264(RtpDecoder* rtp_decoder, uint8_t* buf, size_t size) {
       if (fu_header->e) {
         // end of fragmented NALU
         if (rtp_decoder->on_packet != NULL) {
-          rtp_decoder->on_packet(nalu_buf, offset, rtp_decoder->user_data);
+          rtp_decoder->on_packet(nalu_buf, offset, &metadata,
+                                 rtp_decoder->user_data);
         }
         offset = 0;  // reset for next NALU
       }
@@ -268,8 +281,15 @@ static int rtp_decode_h264(RtpDecoder* rtp_decoder, uint8_t* buf, size_t size) {
 
 static int rtp_decode_generic(RtpDecoder* rtp_decoder, uint8_t* buf, size_t size) {
   RtpPacket* rtp_packet = (RtpPacket*)buf;
-  if (rtp_decoder->on_packet != NULL)
-    rtp_decoder->on_packet(rtp_packet->payload, size - sizeof(RtpHeader), rtp_decoder->user_data);
+  RtpPacketMetadata metadata;
+
+  if (rtp_decoder->on_packet != NULL) {
+    metadata.sequence_number = ntohs(rtp_packet->header.seq_number);
+    metadata.timestamp = ntohl(rtp_packet->header.timestamp);
+    metadata.ssrc = ntohl(rtp_packet->header.ssrc);
+    rtp_decoder->on_packet(rtp_packet->payload, size - sizeof(RtpHeader),
+                           &metadata, rtp_decoder->user_data);
+  }
   // even if there is no callback set, assume everything is ok for caller and do not return an error
   return (int)size;
 }
