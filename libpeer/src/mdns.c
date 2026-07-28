@@ -120,7 +120,7 @@ int mdns_resolve_addr(const char* hostname, Address* addr) {
   UdpSocket udp_socket;
   uint8_t buf[256];
   char addr_string[ADDRSTRLEN];
-  struct timeval tv = {1, 0};
+  struct timeval tv = {0, 100000};
   fd_set rfds;
   int maxfd, send_retry, recv_retry, size, ret;
 
@@ -142,7 +142,7 @@ int mdns_resolve_addr(const char* hostname, Address* addr) {
   for (send_retry = 3; send_retry > 0; send_retry--) {
     size = mdns_build_query(hostname, buf, sizeof(buf));
     udp_socket_sendto(&udp_socket, &mcast_addr, buf, size);
-    for (recv_retry = 5; recv_retry > 0; recv_retry--) {
+    for (recv_retry = 1; recv_retry > 0; recv_retry--) {
       FD_SET(udp_socket.fd, &rfds);
       ret = select(maxfd + 1, &rfds, NULL, NULL, &tv);
 

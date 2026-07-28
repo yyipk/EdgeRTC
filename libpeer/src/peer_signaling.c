@@ -1,7 +1,6 @@
 #ifndef DISABLE_PEER_SIGNALING
 #include <assert.h>
 #include <cJSON.h>
-#include <signal.h>
 #include <string.h>
 #include <unistd.h>
 
