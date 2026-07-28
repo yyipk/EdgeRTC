@@ -62,6 +62,7 @@ typedef struct DtlsSrtp {
 
   DtlsSrtpRole role;
   DtlsSrtpState state;
+  int initialized;
 
   char local_fingerprint[DTLS_SRTP_FINGERPRINT_LENGTH];
   char remote_fingerprint[DTLS_SRTP_FINGERPRINT_LENGTH];

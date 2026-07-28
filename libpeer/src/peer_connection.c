@@ -435,10 +435,12 @@ void peer_connection_set_remote_description(PeerConnection* pc, const char* sdp,
 
 static const char* peer_connection_create_sdp(PeerConnection* pc, SdpType sdp_type) {
   char* description = (char*)pc->temp_buf;
+  char remote_fingerprint[DTLS_SRTP_FINGERPRINT_LENGTH] = {0};
 
   memset(pc->temp_buf, 0, sizeof(pc->temp_buf));
   DtlsSrtpRole role = DTLS_SRTP_ROLE_SERVER;
 
+  sctp_destroy_association(&pc->sctp);
   pc->sctp.connected = 0;
 
   switch (sdp_type) {
@@ -450,13 +452,21 @@ static const char* peer_connection_create_sdp(PeerConnection* pc, SdpType sdp_ty
     case SDP_TYPE_ANSWER:
       role = DTLS_SRTP_ROLE_CLIENT;
       pc->agent.mode = AGENT_MODE_CONTROLLED;
+      memcpy(remote_fingerprint, pc->dtls_srtp.remote_fingerprint,
+             sizeof(remote_fingerprint));
       break;
     default:
       break;
   }
 
-  dtls_srtp_reset_session(&pc->dtls_srtp);
+  if (pc->dtls_srtp.initialized) {
+    dtls_srtp_deinit(&pc->dtls_srtp);
+  }
   dtls_srtp_init(&pc->dtls_srtp, role, pc);
+  if (sdp_type == SDP_TYPE_ANSWER) {
+    memcpy(pc->dtls_srtp.remote_fingerprint, remote_fingerprint,
+           sizeof(remote_fingerprint));
+  }
   pc->dtls_srtp.udp_recv = peer_connection_dtls_srtp_recv;
   pc->dtls_srtp.udp_send = peer_connection_dtls_srtp_send;
 

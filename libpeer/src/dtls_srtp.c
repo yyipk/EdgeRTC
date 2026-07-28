@@ -153,6 +153,8 @@ int dtls_srtp_init(DtlsSrtp* dtls_srtp, DtlsSrtpRole role, void* user_data) {
       MBEDTLS_TLS_SRTP_NULL_HMAC_SHA1_32,
       MBEDTLS_TLS_SRTP_UNSET};
 
+  memset(dtls_srtp, 0, sizeof(*dtls_srtp));
+
   dtls_srtp->role = role;
   dtls_srtp->state = DTLS_SRTP_STATE_INIT;
   dtls_srtp->user_data = user_data;
@@ -166,6 +168,8 @@ int dtls_srtp_init(DtlsSrtp* dtls_srtp, DtlsSrtpRole role, void* user_data) {
   mbedtls_pk_init(&dtls_srtp->pkey);
   mbedtls_entropy_init(&dtls_srtp->entropy);
   mbedtls_ctr_drbg_init(&dtls_srtp->ctr_drbg);
+  mbedtls_ssl_cookie_init(&dtls_srtp->cookie_ctx);
+  dtls_srtp->initialized = 1;
 #if CONFIG_MBEDTLS_DEBUG
   mbedtls_debug_set_threshold(3);
   mbedtls_ssl_conf_dbg(&dtls_srtp->conf, dtls_srtp_debug, NULL);
@@ -189,8 +193,6 @@ int dtls_srtp_init(DtlsSrtp* dtls_srtp, DtlsSrtpRole role, void* user_data) {
                                 MBEDTLS_SSL_IS_SERVER,
                                 MBEDTLS_SSL_TRANSPORT_DATAGRAM,
                                 MBEDTLS_SSL_PRESET_DEFAULT);
-
-    mbedtls_ssl_cookie_init(&dtls_srtp->cookie_ctx);
 
     mbedtls_ssl_cookie_setup(&dtls_srtp->cookie_ctx, mbedtls_ctr_drbg_random, &dtls_srtp->ctr_drbg);
 
@@ -219,6 +221,17 @@ int dtls_srtp_init(DtlsSrtp* dtls_srtp, DtlsSrtpRole role, void* user_data) {
 }
 
 void dtls_srtp_deinit(DtlsSrtp* dtls_srtp) {
+  if (!dtls_srtp->initialized) {
+    return;
+  }
+
+  if (dtls_srtp->srtp_in != NULL) {
+    srtp_dealloc(dtls_srtp->srtp_in);
+  }
+  if (dtls_srtp->srtp_out != NULL) {
+    srtp_dealloc(dtls_srtp->srtp_out);
+  }
+
   mbedtls_ssl_free(&dtls_srtp->ssl);
   mbedtls_ssl_config_free(&dtls_srtp->conf);
 
@@ -227,14 +240,8 @@ void dtls_srtp_deinit(DtlsSrtp* dtls_srtp) {
   mbedtls_entropy_free(&dtls_srtp->entropy);
   mbedtls_ctr_drbg_free(&dtls_srtp->ctr_drbg);
 
-  if (dtls_srtp->role == DTLS_SRTP_ROLE_SERVER) {
-    mbedtls_ssl_cookie_free(&dtls_srtp->cookie_ctx);
-  }
-
-  if (dtls_srtp->state == DTLS_SRTP_STATE_CONNECTED) {
-    srtp_dealloc(dtls_srtp->srtp_in);
-    srtp_dealloc(dtls_srtp->srtp_out);
-  }
+  mbedtls_ssl_cookie_free(&dtls_srtp->cookie_ctx);
+  memset(dtls_srtp, 0, sizeof(*dtls_srtp));
 }
 
 static int dtls_srtp_key_derivation(DtlsSrtp* dtls_srtp, const unsigned char* master_secret, size_t secret_len, const unsigned char* randbytes, size_t randbytes_len, mbedtls_tls_prf_types tls_prf_type) {
@@ -322,6 +329,8 @@ static int dtls_srtp_key_derivation(DtlsSrtp* dtls_srtp, const unsigned char* ma
 
   if (srtp_create(&dtls_srtp->srtp_out, &dtls_srtp->local_policy) != srtp_err_status_ok) {
     LOGE("Error creating outbound SRTP session");
+    srtp_dealloc(dtls_srtp->srtp_in);
+    dtls_srtp->srtp_in = NULL;
     return -1;
   }
 
@@ -465,11 +474,18 @@ int dtls_srtp_handshake(DtlsSrtp* dtls_srtp, Address* addr) {
 }
 
 void dtls_srtp_reset_session(DtlsSrtp* dtls_srtp) {
-  if (dtls_srtp->state == DTLS_SRTP_STATE_CONNECTED) {
-    srtp_dealloc(dtls_srtp->srtp_in);
-    srtp_dealloc(dtls_srtp->srtp_out);
-    mbedtls_ssl_session_reset(&dtls_srtp->ssl);
+  if (!dtls_srtp->initialized) {
+    return;
   }
+  if (dtls_srtp->srtp_in != NULL) {
+    srtp_dealloc(dtls_srtp->srtp_in);
+    dtls_srtp->srtp_in = NULL;
+  }
+  if (dtls_srtp->srtp_out != NULL) {
+    srtp_dealloc(dtls_srtp->srtp_out);
+    dtls_srtp->srtp_out = NULL;
+  }
+  mbedtls_ssl_session_reset(&dtls_srtp->ssl);
 
   dtls_srtp->state = DTLS_SRTP_STATE_INIT;
 }
