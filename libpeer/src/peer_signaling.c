@@ -166,15 +166,22 @@ static void peer_signaling_on_pub_event(const char* msg, size_t size) {
   req = res = item = result = error = NULL;
   state = peer_connection_get_state(g_ps.pc);
   do {
-    req = cJSON_Parse(msg);
+    req = cJSON_ParseWithLength(msg, size);
     if (!req) {
       error = cJSON_CreateRaw(RPC_ERROR_PARSE_ERROR);
       LOGW("Parse json failed");
       break;
     }
 
+    item = cJSON_GetObjectItem(req, "method");
+    if (item == NULL &&
+        (cJSON_GetObjectItem(req, "result") != NULL ||
+         cJSON_GetObjectItem(req, "error") != NULL)) {
+      break;
+    }
+
     item = cJSON_GetObjectItem(req, "id");
-    if (!item && !cJSON_IsNumber(item)) {
+    if (!cJSON_IsNumber(item)) {
       error = cJSON_CreateRaw(RPC_ERROR_INVALID_REQUEST);
       LOGW("Cannot find id");
       break;
@@ -183,7 +190,7 @@ static void peer_signaling_on_pub_event(const char* msg, size_t size) {
     id = item->valueint;
 
     item = cJSON_GetObjectItem(req, "method");
-    if (!item && cJSON_IsString(item)) {
+    if (!cJSON_IsString(item)) {
       error = cJSON_CreateRaw(RPC_ERROR_INVALID_REQUEST);
       LOGW("Cannot find method");
       break;
@@ -204,7 +211,7 @@ static void peer_signaling_on_pub_event(const char* msg, size_t size) {
       }
     } else if (strcmp(item->valuestring, RPC_METHOD_ANSWER) == 0) {
       item = cJSON_GetObjectItem(req, "params");
-      if (!item && !cJSON_IsString(item)) {
+      if (!cJSON_IsString(item)) {
         error = cJSON_CreateRaw(RPC_ERROR_INVALID_PARAMS);
         LOGW("Cannot find params");
         break;
