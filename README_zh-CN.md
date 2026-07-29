@@ -22,6 +22,7 @@ libpeer 开发，专注于小内存、小 Flash 占用以及低延迟的实时�
 - 提供 H.264、G.711 A-law、G.711 mu-law 和 Opus 的 RTP/RTCP 媒体链路。
 - 支持 WHIP 和 MQTT 信令。
 - 提供可重复连接的传输生命周期管理和有边界的数据包解析。
+- 提供适用于资源受限音频接收端的可选精简 PCMA 抖动缓冲和丢包补偿。
 - 提供包括 AEC4 回声消除在内的可选嵌入式音频算法。
 
 EdgeRTC 适用于摄像头、对讲设备、传感器、网关及其他需要 WebRTC 通信能力
@@ -50,8 +51,8 @@ cmake -S libpeer -B build
 cmake --build build
 ```
 
-嵌入式 SDK 可以从自身组件构建文件中引入 `libpeer/CMakeLists.txt`，并按需引入
-算法目录。
+仓库根目录的 `CMakeLists.txt` 是嵌入式 SDK 的组件入口，负责注册已启用的
+libpeer 和音频算法目标，并对 EdgeRTC 目标启用链接时优化。
 
 ## 上游与许可
 

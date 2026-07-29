@@ -23,6 +23,8 @@ overhead of a browser-sized runtime.
 - RTP/RTCP paths for H.264, G.711 A-law, G.711 mu-law, and Opus media.
 - WHIP and MQTT signaling options.
 - Reconnect-safe transport lifecycle and bounded packet parsing.
+- Optional compact PCMA jitter buffering and packet-loss concealment for
+  constrained audio receivers.
 - Optional embedded audio processing algorithms, including AEC4 acoustic echo
   cancellation.
 
@@ -54,8 +56,9 @@ cmake -S libpeer -B build
 cmake --build build
 ```
 
-Embedded SDK integrations may include `libpeer/CMakeLists.txt` and the required
-algorithm directories from their own component build files.
+The repository root `CMakeLists.txt` is the embedded SDK component entry. It
+registers the enabled libpeer and audio algorithm targets and builds EdgeRTC
+targets with link-time optimization.
 
 ## Upstream and licenses
 
