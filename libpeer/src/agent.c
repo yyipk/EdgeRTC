@@ -151,6 +151,9 @@ void agent_clear_candidates(Agent* agent) {
   agent->candidate_pairs_num = 0;
   agent->selected_pair = NULL;
   agent->nominated_pair = NULL;
+  agent->consent_last_received_ms = 0;
+  agent->consent_last_send_ms = 0;
+  memset(agent->consent_transaction_id, 0, sizeof(agent->consent_transaction_id));
 }
 
 int agent_create(Agent* agent) {
@@ -473,14 +476,18 @@ static void agent_create_binding_response(Agent* agent, StunMessage* msg, Addres
   stun_msg_finish(msg, STUN_CREDENTIAL_SHORT_TERM, agent->local_upwd, strlen(agent->local_upwd));
 }
 
-static void agent_create_binding_request(Agent* agent, StunMessage* msg) {
+static void agent_create_binding_request(Agent* agent, StunMessage* msg, int consent) {
   uint64_t tie_breaker = 0;  // always be controlled
-  uint32_t priority = htonl(agent->nominated_pair->local->priority);
+  IceCandidatePair* pair = consent ? agent->selected_pair : agent->nominated_pair;
+  uint32_t priority = htonl(pair->local->priority);
   StunHeader* header;
   // send binding request
   stun_msg_create(msg, STUN_CLASS_REQUEST | STUN_METHOD_BINDING);
   header = (StunHeader*)msg->buf;
-  if (agent->nominated_pair->conncheck == 0) {
+  if (consent) {
+    memcpy(agent->consent_transaction_id, header->transaction_id,
+           sizeof(agent->consent_transaction_id));
+  } else if (agent->nominated_pair->conncheck == 0) {
     memcpy(agent->conncheck_transaction_id, header->transaction_id,
            sizeof(agent->conncheck_transaction_id));
   } else {
@@ -493,7 +500,9 @@ static void agent_create_binding_request(Agent* agent, StunMessage* msg) {
   stun_msg_write_attr(msg, STUN_ATTR_TYPE_USERNAME, strlen(username), username);
   stun_msg_write_attr(msg, STUN_ATTR_TYPE_PRIORITY, sizeof(priority), (char*)&priority);
   if (agent->mode == AGENT_MODE_CONTROLLING) {
-    stun_msg_write_attr(msg, STUN_ATTR_TYPE_USE_CANDIDATE, 0, NULL);
+    if (!consent) {
+      stun_msg_write_attr(msg, STUN_ATTR_TYPE_USE_CANDIDATE, 0, NULL);
+    }
     stun_msg_write_attr(msg, STUN_ATTR_TYPE_ICE_CONTROLLING, 8, (char*)&tie_breaker);
   } else {
     stun_msg_write_attr(msg, STUN_ATTR_TYPE_ICE_CONTROLLED, 8, (char*)&tie_breaker);
@@ -525,7 +534,10 @@ void agent_process_stun_request(Agent* agent, StunMessage* stun_msg, Address* ad
         if (agent_socket_send(agent, addr, msg.buf, msg.size) < 0) {
           LOGW("ICE failed to send Binding Response to %s:%d", addr_string, addr->port);
         }
-        agent->binding_request_time = ports_get_epoch_time();
+        if (agent->selected_pair != NULL &&
+            addr_equal(addr, &agent->selected_pair->remote->addr)) {
+          agent->consent_last_received_ms = ports_get_epoch_time();
+        }
         if (agent->selected_pair == NULL) {
           agent_queue_triggered_check(agent, stun_msg, addr);
         }
@@ -547,6 +559,14 @@ void agent_process_stun_response(Agent* agent, StunMessage* stun_msg, Address* a
       addr_to_string(addr, received_addr, sizeof(received_addr));
       if (stun_msg_is_valid(stun_msg->buf, stun_msg->size, agent->remote_upwd) != 0) {
         LOGW("ICE rejected Binding Response from %s:%d: authentication failed", received_addr, addr->port);
+        break;
+      }
+      if (agent->selected_pair != NULL &&
+          addr_equal(addr, &agent->selected_pair->remote->addr) &&
+          memcmp(header->transaction_id, agent->consent_transaction_id,
+                 sizeof(header->transaction_id)) == 0) {
+        agent->consent_last_received_ms = ports_get_epoch_time();
+        LOGD("ICE received consent response from %s:%d", received_addr, addr->port);
         break;
       }
       if (agent->nominated_pair == NULL ||
@@ -707,7 +727,7 @@ int agent_connectivity_check(Agent* agent) {
       now - agent->conncheck_last_send_ms >= AGENT_CONNCHECK_INTERVAL_MS) {
     addr_to_string(&agent->nominated_pair->remote->addr, addr_string, sizeof(addr_string));
     LOGD("send binding request to remote ip: %s, port: %d", addr_string, agent->nominated_pair->remote->addr.port);
-    agent_create_binding_request(agent, &msg);
+    agent_create_binding_request(agent, &msg, 0);
     if (agent_socket_send(agent, &agent->nominated_pair->remote->addr, msg.buf, msg.size) < 0) {
       LOGW("ICE failed to send Binding Request to %s:%d",
            addr_string, agent->nominated_pair->remote->addr.port);
@@ -721,10 +741,37 @@ int agent_connectivity_check(Agent* agent) {
   if (agent->nominated_pair->state == ICE_CANDIDATE_STATE_SUCCEEDED) {
     agent_log_candidate_pair("selected", agent->nominated_pair);
     agent->selected_pair = agent->nominated_pair;
+    agent->consent_last_received_ms = now;
+    agent->consent_last_send_ms = now;
     return 0;
   }
 
   return -1;
+}
+
+int agent_consent_check(Agent* agent) {
+  char addr_string[ADDRSTRLEN];
+  uint32_t now = ports_get_epoch_time();
+  StunMessage msg;
+
+  if (agent->selected_pair == NULL) {
+    return -1;
+  }
+
+  if (now - agent->consent_last_send_ms >= CONFIG_KEEPALIVE_INTERVAL) {
+    memset(&msg, 0, sizeof(msg));
+    agent_create_binding_request(agent, &msg, 1);
+    if (agent_socket_send(agent, &agent->selected_pair->remote->addr,
+                          msg.buf, msg.size) < 0) {
+      addr_to_string(&agent->selected_pair->remote->addr,
+                     addr_string, sizeof(addr_string));
+      LOGW("ICE failed to send consent request to %s:%d",
+           addr_string, agent->selected_pair->remote->addr.port);
+    }
+    agent->consent_last_send_ms = now;
+  }
+
+  return now - agent->consent_last_received_ms > CONFIG_KEEPALIVE_TIMEOUT ? -1 : 0;
 }
 
 int agent_select_candidate_pair(Agent* agent) {

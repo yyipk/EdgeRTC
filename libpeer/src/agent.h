@@ -58,7 +58,9 @@ struct Agent {
 
   Address host_addr;
   int b_host_addr;
-  uint64_t binding_request_time;
+  uint32_t consent_last_received_ms;
+  uint32_t consent_last_send_ms;
+  uint32_t consent_transaction_id[3];
   AgentState state;
 
   AgentMode mode;
@@ -90,6 +92,8 @@ void agent_set_remote_description(Agent* agent, char* description);
 int agent_select_candidate_pair(Agent* agent);
 
 int agent_connectivity_check(Agent* agent);
+
+int agent_consent_check(Agent* agent);
 
 void agent_clear_candidates(Agent* agent);
 

@@ -20,6 +20,7 @@
 | `fix(signaling): isolate MQTT sessions by device` | Derive a unique MQTT client ID from the active network interface MAC address. |
 | `fix(stun): track transactions and ICE attributes` | Generate per-request transaction IDs and parse priority, role, nomination, and error attributes. |
 | `feat(ice): support triggered peer-reflexive checks` | Create prflx candidates from authenticated inbound checks and validate candidate-pair responses. |
+| `fix(ice): verify consent on selected pairs` | Send periodic authenticated Binding requests and close connections whose selected pair no longer responds. |
 | `perf(transport): drain queued datagrams per loop` | Process up to 16 queued datagrams per peer loop iteration. |
 | `fix(dtls): release and rebuild session state safely` | Release SRTP, DTLS cookie, SCTP, and fingerprint state across reconnects. |
 | `fix(dtls): reassemble fragmented ClientHello records` | Reassemble fragmented DTLS ClientHello records before passing them to the TLS stack. |

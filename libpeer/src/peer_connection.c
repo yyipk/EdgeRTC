@@ -367,8 +367,8 @@ int peer_connection_loop(PeerConnection* pc) {
         }
       }
 
-      if (CONFIG_KEEPALIVE_TIMEOUT > 0 && (ports_get_epoch_time() - pc->agent.binding_request_time) > CONFIG_KEEPALIVE_TIMEOUT) {
-        LOGI("binding request timeout");
+      if (CONFIG_KEEPALIVE_TIMEOUT > 0 && agent_consent_check(&pc->agent) < 0) {
+        LOGI("ICE consent timeout");
         STATE_CHANGED(pc, PEER_CONNECTION_CLOSED);
       }
 
