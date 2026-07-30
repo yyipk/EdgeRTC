@@ -47,7 +47,62 @@ struct PeerConnection {
 
   uint32_t remote_assrc;
   uint32_t remote_vssrc;
+  SdpMedia remote_media[SDP_MAX_MEDIA_COUNT];
+  size_t remote_media_count;
 };
+
+static const char* peer_connection_default_mid(SdpMediaType type) {
+  switch (type) {
+    case SDP_MEDIA_VIDEO:
+      return "video";
+    case SDP_MEDIA_AUDIO:
+      return "audio";
+    case SDP_MEDIA_DATACHANNEL:
+      return "datachannel";
+    default:
+      return "";
+  }
+}
+
+static SdpMediaType peer_connection_media_type(const char* line) {
+  if (strncmp(line, "m=video ", strlen("m=video ")) == 0) {
+    return SDP_MEDIA_VIDEO;
+  }
+  if (strncmp(line, "m=audio ", strlen("m=audio ")) == 0) {
+    return SDP_MEDIA_AUDIO;
+  }
+  if (strncmp(line, "m=application ", strlen("m=application ")) == 0) {
+    return SDP_MEDIA_DATACHANNEL;
+  }
+  return SDP_MEDIA_NONE;
+}
+
+static int peer_connection_media_enabled(PeerConnection* pc,
+                                         SdpMediaType type) {
+  switch (type) {
+    case SDP_MEDIA_VIDEO:
+      return pc->config.video_codec != CODEC_NONE;
+    case SDP_MEDIA_AUDIO:
+      return pc->config.audio_codec != CODEC_NONE;
+    case SDP_MEDIA_DATACHANNEL:
+      return pc->config.datachannel;
+    default:
+      return 0;
+  }
+}
+
+static void peer_connection_add_media(SdpMedia* media, size_t* media_count,
+                                      SdpMediaType type) {
+  SdpMedia* entry;
+
+  if (*media_count >= SDP_MAX_MEDIA_COUNT) {
+    return;
+  }
+  entry = &media[(*media_count)++];
+  entry->type = type;
+  snprintf(entry->mid, sizeof(entry->mid), "%s",
+           peer_connection_default_mid(type));
+}
 
 static void peer_connection_outgoing_rtp_packet(
     uint8_t* data, size_t size, const RtpPacketMetadata* metadata,
@@ -396,6 +451,7 @@ void peer_connection_set_remote_description(PeerConnection* pc, const char* sdp,
   DtlsSrtpRole role = DTLS_SRTP_ROLE_SERVER;
   int is_update = 0;
   Agent* agent = &pc->agent;
+  SdpMedia* current_media = NULL;
 
   if (type == SDP_TYPE_ANSWER && pc->b_remote_answer_set) {
     LOGW("Ignoring additional remote answer");
@@ -410,6 +466,10 @@ void peer_connection_set_remote_description(PeerConnection* pc, const char* sdp,
     pc->remote_assrc = 0;
     pc->remote_vssrc = 0;
     pc->b_remote_answer_set = 0;
+  }
+  if (type == SDP_TYPE_OFFER) {
+    memset(pc->remote_media, 0, sizeof(pc->remote_media));
+    pc->remote_media_count = 0;
   }
 
   while ((line = strstr(start, "\r\n"))) {
@@ -437,6 +497,23 @@ void peer_connection_set_remote_description(PeerConnection* pc, const char* sdp,
       ssrc = &pc->remote_assrc;
     }
 
+    if (type == SDP_TYPE_OFFER && strncmp(buf, "m=", 2) == 0) {
+      SdpMediaType media_type = peer_connection_media_type(buf);
+      current_media = NULL;
+      if (media_type != SDP_MEDIA_NONE &&
+          pc->remote_media_count < SDP_MAX_MEDIA_COUNT) {
+        current_media = &pc->remote_media[pc->remote_media_count++];
+        current_media->type = media_type;
+        snprintf(current_media->mid, sizeof(current_media->mid), "%s",
+                 peer_connection_default_mid(media_type));
+      }
+    } else if (type == SDP_TYPE_OFFER && current_media != NULL &&
+               strncmp(buf, "a=mid:", strlen("a=mid:")) == 0 &&
+               strlen(buf + strlen("a=mid:")) < sizeof(current_media->mid)) {
+      snprintf(current_media->mid, sizeof(current_media->mid), "%s",
+               buf + strlen("a=mid:"));
+    }
+
     if ((val_start = strstr(buf, "a=ssrc:")) && ssrc) {
       *ssrc = strtoul(val_start + 7, NULL, 10);
       LOGD("SSRC: %" PRIu32, *ssrc);
@@ -460,6 +537,9 @@ void peer_connection_set_remote_description(PeerConnection* pc, const char* sdp,
 static const char* peer_connection_create_sdp(PeerConnection* pc, SdpType sdp_type) {
   char* description = (char*)pc->temp_buf;
   char remote_fingerprint[DTLS_SRTP_FINGERPRINT_LENGTH] = {0};
+  SdpMedia media[SDP_MAX_MEDIA_COUNT] = {0};
+  size_t media_count = 0;
+  size_t i;
 
   memset(pc->temp_buf, 0, sizeof(pc->temp_buf));
   DtlsSrtpRole role = DTLS_SRTP_ROLE_SERVER;
@@ -500,11 +580,25 @@ static const char* peer_connection_create_sdp(PeerConnection* pc, SdpType sdp_ty
   pc->dtls_srtp.udp_send = peer_connection_dtls_srtp_send;
 
   memset(pc->sdp, 0, sizeof(pc->sdp));
-  // TODO: check if we have video or audio codecs
-  sdp_create(pc->sdp,
-             pc->config.video_codec != CODEC_NONE,
-             pc->config.audio_codec != CODEC_NONE,
-             pc->config.datachannel);
+  if (sdp_type == SDP_TYPE_ANSWER && pc->remote_media_count > 0) {
+    for (i = 0; i < pc->remote_media_count; ++i) {
+      if (peer_connection_media_enabled(pc, pc->remote_media[i].type)) {
+        media[media_count++] = pc->remote_media[i];
+      }
+    }
+  } else {
+    if (pc->config.video_codec != CODEC_NONE) {
+      peer_connection_add_media(media, &media_count, SDP_MEDIA_VIDEO);
+    }
+    if (pc->config.audio_codec != CODEC_NONE) {
+      peer_connection_add_media(media, &media_count, SDP_MEDIA_AUDIO);
+    }
+    if (pc->config.datachannel) {
+      peer_connection_add_media(media, &media_count,
+                                SDP_MEDIA_DATACHANNEL);
+    }
+  }
+  sdp_create(pc->sdp, media, media_count);
 
   agent_create_ice_credential(&pc->agent);
   sdp_append(pc->sdp, "a=ice-ufrag:%s", pc->agent.local_ufrag);
@@ -512,25 +606,33 @@ static const char* peer_connection_create_sdp(PeerConnection* pc, SdpType sdp_ty
   sdp_append(pc->sdp, "a=fingerprint:sha-256 %s", pc->dtls_srtp.local_fingerprint);
   sdp_append(pc->sdp, peer_connection_dtls_role_setup_value(role));
 
-  if (pc->config.video_codec == CODEC_H264) {
-    sdp_append_h264(pc->sdp);
-  }
-
-  switch (pc->config.audio_codec) {
-    case CODEC_PCMA:
-      sdp_append_pcma(pc->sdp);
-      break;
-    case CODEC_PCMU:
-      sdp_append_pcmu(pc->sdp);
-      break;
-    case CODEC_OPUS:
-      sdp_append_opus(pc->sdp);
-    default:
-      break;
-  }
-
-  if (pc->config.datachannel) {
-    sdp_append_datachannel(pc->sdp);
+  for (i = 0; i < media_count; ++i) {
+    switch (media[i].type) {
+      case SDP_MEDIA_VIDEO:
+        if (pc->config.video_codec == CODEC_H264) {
+          sdp_append_h264(pc->sdp, media[i].mid);
+        }
+        break;
+      case SDP_MEDIA_AUDIO:
+        switch (pc->config.audio_codec) {
+          case CODEC_PCMA:
+            sdp_append_pcma(pc->sdp, media[i].mid);
+            break;
+          case CODEC_PCMU:
+            sdp_append_pcmu(pc->sdp, media[i].mid);
+            break;
+          case CODEC_OPUS:
+            sdp_append_opus(pc->sdp, media[i].mid);
+          default:
+            break;
+        }
+        break;
+      case SDP_MEDIA_DATACHANNEL:
+        sdp_append_datachannel(pc->sdp, media[i].mid);
+        break;
+      default:
+        break;
+    }
   }
 
   pc->b_local_description_created = 1;

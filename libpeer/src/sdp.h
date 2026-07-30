@@ -5,22 +5,36 @@
 #include "config.h"
 
 #define SDP_ATTR_LENGTH 128
+#define SDP_MAX_MEDIA_COUNT 3
+#define SDP_MID_LENGTH 32
 
 #ifndef ICE_LITE
 #define ICE_LITE 0
 #endif
 
-void sdp_append_h264(char* sdp);
+typedef enum SdpMediaType {
+  SDP_MEDIA_NONE = 0,
+  SDP_MEDIA_VIDEO,
+  SDP_MEDIA_AUDIO,
+  SDP_MEDIA_DATACHANNEL,
+} SdpMediaType;
 
-void sdp_append_pcma(char* sdp);
+typedef struct SdpMedia {
+  SdpMediaType type;
+  char mid[SDP_MID_LENGTH];
+} SdpMedia;
 
-void sdp_append_pcmu(char* sdp);
+void sdp_append_h264(char* sdp, const char* mid);
 
-void sdp_append_opus(char* sdp);
+void sdp_append_pcma(char* sdp, const char* mid);
 
-void sdp_append_datachannel(char* sdp);
+void sdp_append_pcmu(char* sdp, const char* mid);
 
-void sdp_create(char* sdp, int b_video, int b_audio, int b_datachannel);
+void sdp_append_opus(char* sdp, const char* mid);
+
+void sdp_append_datachannel(char* sdp, const char* mid);
+
+void sdp_create(char* sdp, const SdpMedia* media, size_t media_count);
 
 int sdp_append(char* sdp, const char* format, ...);
 
