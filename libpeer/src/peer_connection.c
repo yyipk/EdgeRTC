@@ -222,7 +222,8 @@ int peer_connection_send_video(PeerConnection* pc, const uint8_t* buf, size_t le
 }
 
 int peer_connection_datachannel_send(PeerConnection* pc, char* message, size_t len) {
-  return peer_connection_datachannel_send_sid(pc, message, len, 0);
+  uint16_t sid = pc->sctp.stream_count > 0 ? pc->sctp.stream_table[0].sid : 0;
+  return peer_connection_datachannel_send_sid(pc, message, len, sid);
 }
 
 int peer_connection_datachannel_send_sid(PeerConnection* pc, char* message, size_t len, uint16_t sid) {

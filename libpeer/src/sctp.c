@@ -124,7 +124,7 @@ int sctp_outgoing_data(Sctp* sctp, char* buf, size_t len, SctpDataPpid ppid, uin
 
   chunk->type = SCTP_DATA;
   chunk->iube = 0x06;
-  chunk->sid = htons(0);
+  chunk->sid = htons(sid);
   chunk->sqn = htons(sqn++);
   chunk->ppid = htonl(ppid);
 
@@ -169,30 +169,26 @@ void sctp_add_stream_mapping(Sctp* sctp, const char* label, uint16_t sid) {
     LOGE("Stream table full. Cannot add more streams.");
 }
 
+static int sctp_store_data_channel_open(Sctp* sctp, uint16_t sid,
+                                        char* data, size_t length) {
+  if (length < 12 || data[0] != DATA_CHANNEL_OPEN)
+    return -1;
+
+  uint16_t label_length = ntohs(*(uint16_t*)(data + 8));
+  uint16_t protocol_length = ntohs(*(uint16_t*)(data + 10));
+  if (length < 12 + label_length + protocol_length)
+    return -1;
+
+  char label[label_length + 1];
+  memcpy(label, data + 12, label_length);
+  label[label_length] = '\0';
+  printf("DATA_CHANNEL_OPEN: Label=%s, sid=%d\n", label, sid);
+  sctp_add_stream_mapping(sctp, label, sid);
+  return 0;
+}
+
 void sctp_parse_data_channel_open(Sctp* sctp, uint16_t sid, char* data, size_t length) {
-  if (length < 12)
-    return;  // Not enough data for a DATA_CHANNEL_OPEN message
-
-  if (data[0] == DATA_CHANNEL_OPEN) {
-    uint16_t label_length = ntohs(*(uint16_t*)(data + 8));
-    uint16_t protocol_length = ntohs(*(uint16_t*)(data + 10));
-
-    // Ensure we have enough data for the label and protocol
-    if (length < 12 + label_length + protocol_length)
-      return;
-
-    char* label = (char*)(data + 12);
-
-    // copy and null-terminate
-    char label_str[label_length + 1];
-    memcpy(label_str, label, label_length);
-    label_str[label_length] = '\0';
-
-    // Log or process the DATA_CHANNEL_OPEN message
-    printf("DATA_CHANNEL_OPEN: Label=%s, sid=%d\n", label_str, sid);
-
-    // Add stream mapping
-    sctp_add_stream_mapping(sctp, label_str, sid);
+  if (sctp_store_data_channel_open(sctp, sid, data, length) == 0) {
     char ack = DATA_CHANNEL_ACK;
     sctp_outgoing_data(sctp, &ack, 1, DATA_CHANNEL_PPID_CONTROL, sid);
   }
@@ -261,11 +257,15 @@ void sctp_incoming_data(Sctp* sctp, char* buf, size_t len) {
 
         LOGD("SCTP_DATA. ppid = %ld, data = %.2x", ntohl(data_chunk->ppid), data_chunk->data[0]);
         if (ntohl(data_chunk->ppid) == DATA_CHANNEL_PPID_CONTROL && data_chunk->data[0] == DATA_CHANNEL_OPEN) {
+          uint16_t sid = ntohs(data_chunk->sid);
+          sctp_store_data_channel_open(
+              sctp, sid, (char*)data_chunk->data,
+              ntohs(data_chunk->length) - sizeof(SctpDataChunk));
           data_chunk = (SctpDataChunk*)sack_chunk->blocks;
           data_chunk->type = SCTP_DATA;
           data_chunk->iube = 0x03;
           data_chunk->tsn = htonl(sctp->tsn++);
-          data_chunk->sid = htons(0);
+          data_chunk->sid = htons(sid);
           data_chunk->sqn = htons(0);
           data_chunk->ppid = htonl(DATA_CHANNEL_PPID_CONTROL);
           data_chunk->length = htons(1 + sizeof(SctpDataChunk));
