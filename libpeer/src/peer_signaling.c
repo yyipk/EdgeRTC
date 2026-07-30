@@ -34,6 +34,9 @@
 #define DEVICE_SIGNALING_VERSION 1
 #define DEVICE_SESSION_MAX_LEN 48
 #define DEVICE_TOPIC_SUFFIX "/device/%s/signal"
+#define DEVICE_PRESENCE_SUFFIX "/device/%s/presence"
+#define DEVICE_PRESENCE_ONLINE "online"
+#define DEVICE_PRESENCE_OFFLINE "offline"
 
 #define DEVICE_MESSAGE_OFFER "offer"
 #define DEVICE_MESSAGE_ANSWER "answer"
@@ -67,6 +70,7 @@ typedef struct PeerSignaling {
   char subtopic[TOPIC_MAX_LEN];
   char pubtopic[TOPIC_MAX_LEN];
   char device_subtopic[TOPIC_MAX_LEN];
+  char device_presence_topic[TOPIC_MAX_LEN];
 
   uint16_t packet_id;
   int id;
@@ -204,14 +208,15 @@ static int peer_signaling_resolve_url(const char* url, char* host, int* port, ch
 
 static int peer_signaling_mqtt_publish_to(MQTTContext_t* mqtt_ctx,
                                           const char* topic,
-                                          const char* message) {
+                                          const char* message,
+                                          bool retain) {
   MQTTStatus_t status;
   MQTTPublishInfo_t pub_info;
 
   memset(&pub_info, 0, sizeof(pub_info));
 
   pub_info.qos = MQTTQoS0;
-  pub_info.retain = false;
+  pub_info.retain = retain;
   pub_info.pTopicName = topic;
   pub_info.topicNameLength = strlen(topic);
   pub_info.pPayload = message;
@@ -228,7 +233,7 @@ static int peer_signaling_mqtt_publish_to(MQTTContext_t* mqtt_ctx,
 }
 
 static void peer_signaling_mqtt_publish(MQTTContext_t* mqtt_ctx, const char* message) {
-  peer_signaling_mqtt_publish_to(mqtt_ctx, g_ps.pubtopic, message);
+  peer_signaling_mqtt_publish_to(mqtt_ctx, g_ps.pubtopic, message, false);
 }
 
 static int peer_signaling_publish_device_message(const char* device_id,
@@ -262,7 +267,7 @@ static int peer_signaling_publish_device_message(const char* device_id,
 
   payload = cJSON_PrintUnformatted(message);
   if (payload != NULL) {
-    ret = peer_signaling_mqtt_publish_to(&g_ps.mqtt_ctx, topic, payload);
+    ret = peer_signaling_mqtt_publish_to(&g_ps.mqtt_ctx, topic, payload, false);
     free(payload);
   }
   cJSON_Delete(message);
@@ -628,6 +633,8 @@ static void peer_signaling_mqtt_event_cb(MQTTContext_t* mqtt_ctx,
 static int peer_signaling_mqtt_connect(const char* hostname, int port) {
   MQTTStatus_t status;
   MQTTConnectInfo_t conn_info;
+  MQTTPublishInfo_t will_info;
+  const MQTTPublishInfo_t* will = NULL;
   bool session_present;
   char username[TOKEN_MAX_LEN] = {0};
   char password[TOKEN_MAX_LEN] = {0};
@@ -652,6 +659,7 @@ static int peer_signaling_mqtt_connect(const char* hostname, int port) {
   }
 
   memset(&conn_info, 0, sizeof(conn_info));
+  memset(&will_info, 0, sizeof(will_info));
 
   conn_info.cleanSession = true;
 
@@ -670,8 +678,18 @@ static int peer_signaling_mqtt_connect(const char* hostname, int port) {
 
   conn_info.keepAliveSeconds = KEEP_ALIVE_TIMEOUT_SECONDS;
 
+  if (g_ps.device_presence_topic[0] != '\0') {
+    will_info.qos = MQTTQoS0;
+    will_info.retain = true;
+    will_info.pTopicName = g_ps.device_presence_topic;
+    will_info.topicNameLength = strlen(g_ps.device_presence_topic);
+    will_info.pPayload = DEVICE_PRESENCE_OFFLINE;
+    will_info.payloadLength = strlen(DEVICE_PRESENCE_OFFLINE);
+    will = &will_info;
+  }
+
   status = MQTT_Connect(&g_ps.mqtt_ctx,
-                        &conn_info, NULL, CONNACK_RECV_TIMEOUT_MS, &session_present);
+                        &conn_info, will, CONNACK_RECV_TIMEOUT_MS, &session_present);
 
   if (status != MQTTSuccess) {
     LOGE("MQTT_Connect failed: Status=%s.", MQTT_Status_strerror(status));
@@ -681,6 +699,11 @@ static int peer_signaling_mqtt_connect(const char* hostname, int port) {
 
   LOGI("MQTT_Connect succeeded.");
   g_ps.connected = 1;
+  if (g_ps.device_presence_topic[0] != '\0') {
+    peer_signaling_mqtt_publish_to(&g_ps.mqtt_ctx,
+                                   g_ps.device_presence_topic,
+                                   DEVICE_PRESENCE_ONLINE, true);
+  }
   return 0;
 }
 
@@ -762,6 +785,7 @@ int peer_signaling_connect(const char* url, const char* token, PeerConnection* p
   peer_signaling_clear_direct_call();
   memset(g_ps.device_id, 0, sizeof(g_ps.device_id));
   memset(g_ps.device_subtopic, 0, sizeof(g_ps.device_subtopic));
+  memset(g_ps.device_presence_topic, 0, sizeof(g_ps.device_presence_topic));
 
   if ((g_ps.proto = peer_signaling_resolve_url(url, g_ps.host, &g_ps.port, g_ps.path)) < 0) {
     LOGE("Resolve URL failed");
@@ -795,7 +819,12 @@ int peer_signaling_connect(const char* url, const char* token, PeerConnection* p
         if (snprintf(g_ps.device_subtopic, sizeof(g_ps.device_subtopic),
                      "%s" DEVICE_TOPIC_SUFFIX,
                      g_ps.path, g_ps.device_id) >=
-            (int)sizeof(g_ps.device_subtopic)) {
+                (int)sizeof(g_ps.device_subtopic) ||
+            snprintf(g_ps.device_presence_topic,
+                     sizeof(g_ps.device_presence_topic),
+                     "%s" DEVICE_PRESENCE_SUFFIX,
+                     g_ps.path, g_ps.device_id) >=
+                (int)sizeof(g_ps.device_presence_topic)) {
           LOGE("Device signaling topic is too long");
           return -1;
         }
@@ -803,12 +832,10 @@ int peer_signaling_connect(const char* url, const char* token, PeerConnection* p
       }
       ret = peer_signaling_mqtt_connect(g_ps.host, g_ps.port);
       if (ret == 0) {
-        ret = peer_signaling_mqtt_subscribe_topic(g_ps.subtopic, 1);
-        if (ret == 0 && g_ps.device_subtopic[0] != '\0') {
+        if (g_ps.device_subtopic[0] != '\0') {
           ret = peer_signaling_mqtt_subscribe_topic(g_ps.device_subtopic, 1);
-          if (ret < 0) {
-            peer_signaling_mqtt_subscribe_topic(g_ps.subtopic, 0);
-          }
+        } else {
+          ret = peer_signaling_mqtt_subscribe_topic(g_ps.subtopic, 1);
         }
         if (ret < 0) {
           ssl_transport_disconnect(&g_ps.net_ctx);
@@ -830,12 +857,21 @@ int peer_signaling_connect(const char* url, const char* token, PeerConnection* p
 
 void peer_signaling_disconnect() {
   MQTTStatus_t status = MQTTSuccess;
+  int unsubscribe_status;
 
   if (!g_ps.proto && g_ps.connected) {
-    if (g_ps.device_subtopic[0] != '\0') {
-      peer_signaling_mqtt_subscribe_topic(g_ps.device_subtopic, 0);
+    if (g_ps.device_presence_topic[0] != '\0') {
+      peer_signaling_mqtt_publish_to(&g_ps.mqtt_ctx,
+                                     g_ps.device_presence_topic,
+                                     DEVICE_PRESENCE_OFFLINE, true);
     }
-    if (!peer_signaling_mqtt_subscribe_topic(g_ps.subtopic, 0)) {
+    if (g_ps.device_subtopic[0] != '\0') {
+      unsubscribe_status =
+          peer_signaling_mqtt_subscribe_topic(g_ps.device_subtopic, 0);
+    } else {
+      unsubscribe_status = peer_signaling_mqtt_subscribe_topic(g_ps.subtopic, 0);
+    }
+    if (!unsubscribe_status) {
       status = MQTT_Disconnect(&g_ps.mqtt_ctx);
       if (status != MQTTSuccess) {
         LOGE("Failed to disconnect with broker: %s", MQTT_Status_strerror(status));
