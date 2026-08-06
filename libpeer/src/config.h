@@ -4,8 +4,8 @@
 // uncomment this if you want to handshake with a aiortc
 // #define CONFIG_DTLS_USE_ECDSA 1
 
-#define SCTP_MTU (1200)
-#define CONFIG_MTU (1300)
+#define SCTP_MTU (1400)
+#define CONFIG_MTU (1500)
 
 #ifndef CONFIG_USE_LWIP
 #define CONFIG_USE_LWIP 0
