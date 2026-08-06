@@ -606,6 +606,15 @@ static const char* peer_connection_create_sdp(PeerConnection* pc, SdpType sdp_ty
   sdp_append(pc->sdp, "a=fingerprint:sha-256 %s", pc->dtls_srtp.local_fingerprint);
   sdp_append(pc->sdp, peer_connection_dtls_role_setup_value(role));
 
+  agent_gather_candidate(&pc->agent, NULL, NULL, NULL);  // host address
+  for (int i = 0; i < sizeof(pc->config.ice_servers) / sizeof(pc->config.ice_servers[0]); ++i) {
+    if (pc->config.ice_servers[i].urls) {
+      LOGI("ice server: %s", pc->config.ice_servers[i].urls);
+      agent_gather_candidate(&pc->agent, pc->config.ice_servers[i].urls, pc->config.ice_servers[i].username, pc->config.ice_servers[i].credential);
+    }
+  }
+  agent_get_local_description(&pc->agent, description, sizeof(pc->temp_buf));
+
   for (i = 0; i < media_count; ++i) {
     switch (media[i].type) {
       case SDP_MEDIA_VIDEO:
@@ -633,20 +642,12 @@ static const char* peer_connection_create_sdp(PeerConnection* pc, SdpType sdp_ty
       default:
         break;
     }
-  }
-
-  pc->b_local_description_created = 1;
-
-  agent_gather_candidate(&pc->agent, NULL, NULL, NULL);  // host address
-  for (int i = 0; i < sizeof(pc->config.ice_servers) / sizeof(pc->config.ice_servers[0]); ++i) {
-    if (pc->config.ice_servers[i].urls) {
-      LOGI("ice server: %s", pc->config.ice_servers[i].urls);
-      agent_gather_candidate(&pc->agent, pc->config.ice_servers[i].urls, pc->config.ice_servers[i].username, pc->config.ice_servers[i].credential);
+    if (i == 0) {
+      sdp_append(pc->sdp, description);
     }
   }
 
-  agent_get_local_description(&pc->agent, description, sizeof(pc->temp_buf));
-  sdp_append(pc->sdp, description);
+  pc->b_local_description_created = 1;
 
   if (pc->onicecandidate) {
     pc->onicecandidate(pc->sdp, pc->config.user_data);

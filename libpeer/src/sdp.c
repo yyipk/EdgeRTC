@@ -40,7 +40,7 @@ void sdp_append_h264(char* sdp, const char* mid) {
 }
 
 void sdp_append_pcma(char* sdp, const char* mid) {
-  sdp_append(sdp, "m=audio 9 UDP/TLS/RTP/SAVP 8");
+  sdp_append(sdp, "m=audio 9 UDP/TLS/RTP/SAVPF 8");
   sdp_append(sdp, "c=IN IP4 0.0.0.0");
   sdp_append(sdp, "a=rtpmap:8 PCMA/8000");
   sdp_append(sdp, "a=ssrc:4 cname:webrtc-pcma");
@@ -50,7 +50,7 @@ void sdp_append_pcma(char* sdp, const char* mid) {
 }
 
 void sdp_append_pcmu(char* sdp, const char* mid) {
-  sdp_append(sdp, "m=audio 9 UDP/TLS/RTP/SAVP 0");
+  sdp_append(sdp, "m=audio 9 UDP/TLS/RTP/SAVPF 0");
   sdp_append(sdp, "c=IN IP4 0.0.0.0");
   sdp_append(sdp, "a=rtpmap:0 PCMU/8000");
   sdp_append(sdp, "a=ssrc:5 cname:webrtc-pcmu");
@@ -60,7 +60,7 @@ void sdp_append_pcmu(char* sdp, const char* mid) {
 }
 
 void sdp_append_opus(char* sdp, const char* mid) {
-  sdp_append(sdp, "m=audio 9 UDP/TLS/RTP/SAVP 111");
+  sdp_append(sdp, "m=audio 9 UDP/TLS/RTP/SAVPF 111");
   sdp_append(sdp, "c=IN IP4 0.0.0.0");
   sdp_append(sdp, "a=rtpmap:111 opus/48000/2");
   sdp_append(sdp, "a=ssrc:6 cname:webrtc-opus");
