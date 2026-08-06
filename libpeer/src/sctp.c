@@ -8,7 +8,8 @@
 #include <usrsctp.h>
 #endif
 
-static const uint32_t crc32c_table[256] = {
+static const uint32_t crc32c_table[4][256] = {
+  {
     0x00000000L, 0xF26B8303L, 0xE13B70F7L, 0x1350F3F4L,
     0xC79A971FL, 0x35F1141CL, 0x26A1E7E8L, 0xD4CA64EBL,
     0x8AD958CFL, 0x78B2DBCCL, 0x6BE22838L, 0x9989AB3BL,
@@ -72,11 +73,229 @@ static const uint32_t crc32c_table[256] = {
     0xF36E6F75L, 0x0105EC76L, 0x12551F82L, 0xE03E9C81L,
     0x34F4F86AL, 0xC69F7B69L, 0xD5CF889DL, 0x27A40B9EL,
     0x79B737BAL, 0x8BDCB4B9L, 0x988C474DL, 0x6AE7C44EL,
-    0xBE2DA0A5L, 0x4C4623A6L, 0x5F16D052L, 0xAD7D5351L};
+    0xBE2DA0A5L, 0x4C4623A6L, 0x5F16D052L, 0xAD7D5351L},
+    {
+        0x00000000L, 0x13A29877L, 0x274530EEL, 0x34E7A899L,
+        0x4E8A61DCL, 0x5D28F9ABL, 0x69CF5132L, 0x7A6DC945L,
+        0x9D14C3B8L, 0x8EB65BCFL, 0xBA51F356L, 0xA9F36B21L,
+        0xD39EA264L, 0xC03C3A13L, 0xF4DB928AL, 0xE7790AFDL,
+        0x3FC5F181L, 0x2C6769F6L, 0x1880C16FL, 0x0B225918L,
+        0x714F905DL, 0x62ED082AL, 0x560AA0B3L, 0x45A838C4L,
+        0xA2D13239L, 0xB173AA4EL, 0x859402D7L, 0x96369AA0L,
+        0xEC5B53E5L, 0xFFF9CB92L, 0xCB1E630BL, 0xD8BCFB7CL,
+        0x7F8BE302L, 0x6C297B75L, 0x58CED3ECL, 0x4B6C4B9BL,
+        0x310182DEL, 0x22A31AA9L, 0x1644B230L, 0x05E62A47L,
+        0xE29F20BAL, 0xF13DB8CDL, 0xC5DA1054L, 0xD6788823L,
+        0xAC154166L, 0xBFB7D911L, 0x8B507188L, 0x98F2E9FFL,
+        0x404E1283L, 0x53EC8AF4L, 0x670B226DL, 0x74A9BA1AL,
+        0x0EC4735FL, 0x1D66EB28L, 0x298143B1L, 0x3A23DBC6L,
+        0xDD5AD13BL, 0xCEF8494CL, 0xFA1FE1D5L, 0xE9BD79A2L,
+        0x93D0B0E7L, 0x80722890L, 0xB4958009L, 0xA737187EL,
+        0xFF17C604L, 0xECB55E73L, 0xD852F6EAL, 0xCBF06E9DL,
+        0xB19DA7D8L, 0xA23F3FAFL, 0x96D89736L, 0x857A0F41L,
+        0x620305BCL, 0x71A19DCBL, 0x45463552L, 0x56E4AD25L,
+        0x2C896460L, 0x3F2BFC17L, 0x0BCC548EL, 0x186ECCF9L,
+        0xC0D23785L, 0xD370AFF2L, 0xE797076BL, 0xF4359F1CL,
+        0x8E585659L, 0x9DFACE2EL, 0xA91D66B7L, 0xBABFFEC0L,
+        0x5DC6F43DL, 0x4E646C4AL, 0x7A83C4D3L, 0x69215CA4L,
+        0x134C95E1L, 0x00EE0D96L, 0x3409A50FL, 0x27AB3D78L,
+        0x809C2506L, 0x933EBD71L, 0xA7D915E8L, 0xB47B8D9FL,
+        0xCE1644DAL, 0xDDB4DCADL, 0xE9537434L, 0xFAF1EC43L,
+        0x1D88E6BEL, 0x0E2A7EC9L, 0x3ACDD650L, 0x296F4E27L,
+        0x53028762L, 0x40A01F15L, 0x7447B78CL, 0x67E52FFBL,
+        0xBF59D487L, 0xACFB4CF0L, 0x981CE469L, 0x8BBE7C1EL,
+        0xF1D3B55BL, 0xE2712D2CL, 0xD69685B5L, 0xC5341DC2L,
+        0x224D173FL, 0x31EF8F48L, 0x050827D1L, 0x16AABFA6L,
+        0x6CC776E3L, 0x7F65EE94L, 0x4B82460DL, 0x5820DE7AL,
+        0xFBC3FAF9L, 0xE861628EL, 0xDC86CA17L, 0xCF245260L,
+        0xB5499B25L, 0xA6EB0352L, 0x920CABCBL, 0x81AE33BCL,
+        0x66D73941L, 0x7575A136L, 0x419209AFL, 0x523091D8L,
+        0x285D589DL, 0x3BFFC0EAL, 0x0F186873L, 0x1CBAF004L,
+        0xC4060B78L, 0xD7A4930FL, 0xE3433B96L, 0xF0E1A3E1L,
+        0x8A8C6AA4L, 0x992EF2D3L, 0xADC95A4AL, 0xBE6BC23DL,
+        0x5912C8C0L, 0x4AB050B7L, 0x7E57F82EL, 0x6DF56059L,
+        0x1798A91CL, 0x043A316BL, 0x30DD99F2L, 0x237F0185L,
+        0x844819FBL, 0x97EA818CL, 0xA30D2915L, 0xB0AFB162L,
+        0xCAC27827L, 0xD960E050L, 0xED8748C9L, 0xFE25D0BEL,
+        0x195CDA43L, 0x0AFE4234L, 0x3E19EAADL, 0x2DBB72DAL,
+        0x57D6BB9FL, 0x447423E8L, 0x70938B71L, 0x63311306L,
+        0xBB8DE87AL, 0xA82F700DL, 0x9CC8D894L, 0x8F6A40E3L,
+        0xF50789A6L, 0xE6A511D1L, 0xD242B948L, 0xC1E0213FL,
+        0x26992BC2L, 0x353BB3B5L, 0x01DC1B2CL, 0x127E835BL,
+        0x68134A1EL, 0x7BB1D269L, 0x4F567AF0L, 0x5CF4E287L,
+        0x04D43CFDL, 0x1776A48AL, 0x23910C13L, 0x30339464L,
+        0x4A5E5D21L, 0x59FCC556L, 0x6D1B6DCFL, 0x7EB9F5B8L,
+        0x99C0FF45L, 0x8A626732L, 0xBE85CFABL, 0xAD2757DCL,
+        0xD74A9E99L, 0xC4E806EEL, 0xF00FAE77L, 0xE3AD3600L,
+        0x3B11CD7CL, 0x28B3550BL, 0x1C54FD92L, 0x0FF665E5L,
+        0x759BACA0L, 0x663934D7L, 0x52DE9C4EL, 0x417C0439L,
+        0xA6050EC4L, 0xB5A796B3L, 0x81403E2AL, 0x92E2A65DL,
+        0xE88F6F18L, 0xFB2DF76FL, 0xCFCA5FF6L, 0xDC68C781L,
+        0x7B5FDFFFL, 0x68FD4788L, 0x5C1AEF11L, 0x4FB87766L,
+        0x35D5BE23L, 0x26772654L, 0x12908ECDL, 0x013216BAL,
+        0xE64B1C47L, 0xF5E98430L, 0xC10E2CA9L, 0xD2ACB4DEL,
+        0xA8C17D9BL, 0xBB63E5ECL, 0x8F844D75L, 0x9C26D502L,
+        0x449A2E7EL, 0x5738B609L, 0x63DF1E90L, 0x707D86E7L,
+        0x0A104FA2L, 0x19B2D7D5L, 0x2D557F4CL, 0x3EF7E73BL,
+        0xD98EEDC6L, 0xCA2C75B1L, 0xFECBDD28L, 0xED69455FL,
+        0x97048C1AL, 0x84A6146DL, 0xB041BCF4L, 0xA3E32483L
+    },
+    {
+        0x00000000L, 0xA541927EL, 0x4F6F520DL, 0xEA2EC073L,
+        0x9EDEA41AL, 0x3B9F3664L, 0xD1B1F617L, 0x74F06469L,
+        0x38513EC5L, 0x9D10ACBBL, 0x773E6CC8L, 0xD27FFEB6L,
+        0xA68F9ADFL, 0x03CE08A1L, 0xE9E0C8D2L, 0x4CA15AACL,
+        0x70A27D8AL, 0xD5E3EFF4L, 0x3FCD2F87L, 0x9A8CBDF9L,
+        0xEE7CD990L, 0x4B3D4BEEL, 0xA1138B9DL, 0x045219E3L,
+        0x48F3434FL, 0xEDB2D131L, 0x079C1142L, 0xA2DD833CL,
+        0xD62DE755L, 0x736C752BL, 0x9942B558L, 0x3C032726L,
+        0xE144FB14L, 0x4405696AL, 0xAE2BA919L, 0x0B6A3B67L,
+        0x7F9A5F0EL, 0xDADBCD70L, 0x30F50D03L, 0x95B49F7DL,
+        0xD915C5D1L, 0x7C5457AFL, 0x967A97DCL, 0x333B05A2L,
+        0x47CB61CBL, 0xE28AF3B5L, 0x08A433C6L, 0xADE5A1B8L,
+        0x91E6869EL, 0x34A714E0L, 0xDE89D493L, 0x7BC846EDL,
+        0x0F382284L, 0xAA79B0FAL, 0x40577089L, 0xE516E2F7L,
+        0xA9B7B85BL, 0x0CF62A25L, 0xE6D8EA56L, 0x43997828L,
+        0x37691C41L, 0x92288E3FL, 0x78064E4CL, 0xDD47DC32L,
+        0xC76580D9L, 0x622412A7L, 0x880AD2D4L, 0x2D4B40AAL,
+        0x59BB24C3L, 0xFCFAB6BDL, 0x16D476CEL, 0xB395E4B0L,
+        0xFF34BE1CL, 0x5A752C62L, 0xB05BEC11L, 0x151A7E6FL,
+        0x61EA1A06L, 0xC4AB8878L, 0x2E85480BL, 0x8BC4DA75L,
+        0xB7C7FD53L, 0x12866F2DL, 0xF8A8AF5EL, 0x5DE93D20L,
+        0x29195949L, 0x8C58CB37L, 0x66760B44L, 0xC337993AL,
+        0x8F96C396L, 0x2AD751E8L, 0xC0F9919BL, 0x65B803E5L,
+        0x1148678CL, 0xB409F5F2L, 0x5E273581L, 0xFB66A7FFL,
+        0x26217BCDL, 0x8360E9B3L, 0x694E29C0L, 0xCC0FBBBEL,
+        0xB8FFDFD7L, 0x1DBE4DA9L, 0xF7908DDAL, 0x52D11FA4L,
+        0x1E704508L, 0xBB31D776L, 0x511F1705L, 0xF45E857BL,
+        0x80AEE112L, 0x25EF736CL, 0xCFC1B31FL, 0x6A802161L,
+        0x56830647L, 0xF3C29439L, 0x19EC544AL, 0xBCADC634L,
+        0xC85DA25DL, 0x6D1C3023L, 0x8732F050L, 0x2273622EL,
+        0x6ED23882L, 0xCB93AAFCL, 0x21BD6A8FL, 0x84FCF8F1L,
+        0xF00C9C98L, 0x554D0EE6L, 0xBF63CE95L, 0x1A225CEBL,
+        0x8B277743L, 0x2E66E53DL, 0xC448254EL, 0x6109B730L,
+        0x15F9D359L, 0xB0B84127L, 0x5A968154L, 0xFFD7132AL,
+        0xB3764986L, 0x1637DBF8L, 0xFC191B8BL, 0x595889F5L,
+        0x2DA8ED9CL, 0x88E97FE2L, 0x62C7BF91L, 0xC7862DEFL,
+        0xFB850AC9L, 0x5EC498B7L, 0xB4EA58C4L, 0x11ABCABAL,
+        0x655BAED3L, 0xC01A3CADL, 0x2A34FCDEL, 0x8F756EA0L,
+        0xC3D4340CL, 0x6695A672L, 0x8CBB6601L, 0x29FAF47FL,
+        0x5D0A9016L, 0xF84B0268L, 0x1265C21BL, 0xB7245065L,
+        0x6A638C57L, 0xCF221E29L, 0x250CDE5AL, 0x804D4C24L,
+        0xF4BD284DL, 0x51FCBA33L, 0xBBD27A40L, 0x1E93E83EL,
+        0x5232B292L, 0xF77320ECL, 0x1D5DE09FL, 0xB81C72E1L,
+        0xCCEC1688L, 0x69AD84F6L, 0x83834485L, 0x26C2D6FBL,
+        0x1AC1F1DDL, 0xBF8063A3L, 0x55AEA3D0L, 0xF0EF31AEL,
+        0x841F55C7L, 0x215EC7B9L, 0xCB7007CAL, 0x6E3195B4L,
+        0x2290CF18L, 0x87D15D66L, 0x6DFF9D15L, 0xC8BE0F6BL,
+        0xBC4E6B02L, 0x190FF97CL, 0xF321390FL, 0x5660AB71L,
+        0x4C42F79AL, 0xE90365E4L, 0x032DA597L, 0xA66C37E9L,
+        0xD29C5380L, 0x77DDC1FEL, 0x9DF3018DL, 0x38B293F3L,
+        0x7413C95FL, 0xD1525B21L, 0x3B7C9B52L, 0x9E3D092CL,
+        0xEACD6D45L, 0x4F8CFF3BL, 0xA5A23F48L, 0x00E3AD36L,
+        0x3CE08A10L, 0x99A1186EL, 0x738FD81DL, 0xD6CE4A63L,
+        0xA23E2E0AL, 0x077FBC74L, 0xED517C07L, 0x4810EE79L,
+        0x04B1B4D5L, 0xA1F026ABL, 0x4BDEE6D8L, 0xEE9F74A6L,
+        0x9A6F10CFL, 0x3F2E82B1L, 0xD50042C2L, 0x7041D0BCL,
+        0xAD060C8EL, 0x08479EF0L, 0xE2695E83L, 0x4728CCFDL,
+        0x33D8A894L, 0x96993AEAL, 0x7CB7FA99L, 0xD9F668E7L,
+        0x9557324BL, 0x3016A035L, 0xDA386046L, 0x7F79F238L,
+        0x0B899651L, 0xAEC8042FL, 0x44E6C45CL, 0xE1A75622L,
+        0xDDA47104L, 0x78E5E37AL, 0x92CB2309L, 0x378AB177L,
+        0x437AD51EL, 0xE63B4760L, 0x0C158713L, 0xA954156DL,
+        0xE5F54FC1L, 0x40B4DDBFL, 0xAA9A1DCCL, 0x0FDB8FB2L,
+        0x7B2BEBDBL, 0xDE6A79A5L, 0x3444B9D6L, 0x91052BA8L
+    },
+    {
+        0x00000000L, 0xDD45AAB8L, 0xBF672381L, 0x62228939L,
+        0x7B2231F3L, 0xA6679B4BL, 0xC4451272L, 0x1900B8CAL,
+        0xF64463E6L, 0x2B01C95EL, 0x49234067L, 0x9466EADFL,
+        0x8D665215L, 0x5023F8ADL, 0x32017194L, 0xEF44DB2CL,
+        0xE964B13DL, 0x34211B85L, 0x560392BCL, 0x8B463804L,
+        0x924680CEL, 0x4F032A76L, 0x2D21A34FL, 0xF06409F7L,
+        0x1F20D2DBL, 0xC2657863L, 0xA047F15AL, 0x7D025BE2L,
+        0x6402E328L, 0xB9474990L, 0xDB65C0A9L, 0x06206A11L,
+        0xD725148BL, 0x0A60BE33L, 0x6842370AL, 0xB5079DB2L,
+        0xAC072578L, 0x71428FC0L, 0x136006F9L, 0xCE25AC41L,
+        0x2161776DL, 0xFC24DDD5L, 0x9E0654ECL, 0x4343FE54L,
+        0x5A43469EL, 0x8706EC26L, 0xE524651FL, 0x3861CFA7L,
+        0x3E41A5B6L, 0xE3040F0EL, 0x81268637L, 0x5C632C8FL,
+        0x45639445L, 0x98263EFDL, 0xFA04B7C4L, 0x27411D7CL,
+        0xC805C650L, 0x15406CE8L, 0x7762E5D1L, 0xAA274F69L,
+        0xB327F7A3L, 0x6E625D1BL, 0x0C40D422L, 0xD1057E9AL,
+        0xABA65FE7L, 0x76E3F55FL, 0x14C17C66L, 0xC984D6DEL,
+        0xD0846E14L, 0x0DC1C4ACL, 0x6FE34D95L, 0xB2A6E72DL,
+        0x5DE23C01L, 0x80A796B9L, 0xE2851F80L, 0x3FC0B538L,
+        0x26C00DF2L, 0xFB85A74AL, 0x99A72E73L, 0x44E284CBL,
+        0x42C2EEDAL, 0x9F874462L, 0xFDA5CD5BL, 0x20E067E3L,
+        0x39E0DF29L, 0xE4A57591L, 0x8687FCA8L, 0x5BC25610L,
+        0xB4868D3CL, 0x69C32784L, 0x0BE1AEBDL, 0xD6A40405L,
+        0xCFA4BCCFL, 0x12E11677L, 0x70C39F4EL, 0xAD8635F6L,
+        0x7C834B6CL, 0xA1C6E1D4L, 0xC3E468EDL, 0x1EA1C255L,
+        0x07A17A9FL, 0xDAE4D027L, 0xB8C6591EL, 0x6583F3A6L,
+        0x8AC7288AL, 0x57828232L, 0x35A00B0BL, 0xE8E5A1B3L,
+        0xF1E51979L, 0x2CA0B3C1L, 0x4E823AF8L, 0x93C79040L,
+        0x95E7FA51L, 0x48A250E9L, 0x2A80D9D0L, 0xF7C57368L,
+        0xEEC5CBA2L, 0x3380611AL, 0x51A2E823L, 0x8CE7429BL,
+        0x63A399B7L, 0xBEE6330FL, 0xDCC4BA36L, 0x0181108EL,
+        0x1881A844L, 0xC5C402FCL, 0xA7E68BC5L, 0x7AA3217DL,
+        0x52A0C93FL, 0x8FE56387L, 0xEDC7EABEL, 0x30824006L,
+        0x2982F8CCL, 0xF4C75274L, 0x96E5DB4DL, 0x4BA071F5L,
+        0xA4E4AAD9L, 0x79A10061L, 0x1B838958L, 0xC6C623E0L,
+        0xDFC69B2AL, 0x02833192L, 0x60A1B8ABL, 0xBDE41213L,
+        0xBBC47802L, 0x6681D2BAL, 0x04A35B83L, 0xD9E6F13BL,
+        0xC0E649F1L, 0x1DA3E349L, 0x7F816A70L, 0xA2C4C0C8L,
+        0x4D801BE4L, 0x90C5B15CL, 0xF2E73865L, 0x2FA292DDL,
+        0x36A22A17L, 0xEBE780AFL, 0x89C50996L, 0x5480A32EL,
+        0x8585DDB4L, 0x58C0770CL, 0x3AE2FE35L, 0xE7A7548DL,
+        0xFEA7EC47L, 0x23E246FFL, 0x41C0CFC6L, 0x9C85657EL,
+        0x73C1BE52L, 0xAE8414EAL, 0xCCA69DD3L, 0x11E3376BL,
+        0x08E38FA1L, 0xD5A62519L, 0xB784AC20L, 0x6AC10698L,
+        0x6CE16C89L, 0xB1A4C631L, 0xD3864F08L, 0x0EC3E5B0L,
+        0x17C35D7AL, 0xCA86F7C2L, 0xA8A47EFBL, 0x75E1D443L,
+        0x9AA50F6FL, 0x47E0A5D7L, 0x25C22CEEL, 0xF8878656L,
+        0xE1873E9CL, 0x3CC29424L, 0x5EE01D1DL, 0x83A5B7A5L,
+        0xF90696D8L, 0x24433C60L, 0x4661B559L, 0x9B241FE1L,
+        0x8224A72BL, 0x5F610D93L, 0x3D4384AAL, 0xE0062E12L,
+        0x0F42F53EL, 0xD2075F86L, 0xB025D6BFL, 0x6D607C07L,
+        0x7460C4CDL, 0xA9256E75L, 0xCB07E74CL, 0x16424DF4L,
+        0x106227E5L, 0xCD278D5DL, 0xAF050464L, 0x7240AEDCL,
+        0x6B401616L, 0xB605BCAEL, 0xD4273597L, 0x09629F2FL,
+        0xE6264403L, 0x3B63EEBBL, 0x59416782L, 0x8404CD3AL,
+        0x9D0475F0L, 0x4041DF48L, 0x22635671L, 0xFF26FCC9L,
+        0x2E238253L, 0xF36628EBL, 0x9144A1D2L, 0x4C010B6AL,
+        0x5501B3A0L, 0x88441918L, 0xEA669021L, 0x37233A99L,
+        0xD867E1B5L, 0x05224B0DL, 0x6700C234L, 0xBA45688CL,
+        0xA345D046L, 0x7E007AFEL, 0x1C22F3C7L, 0xC167597FL,
+        0xC747336EL, 0x1A0299D6L, 0x782010EFL, 0xA565BA57L,
+        0xBC65029DL, 0x6120A825L, 0x0302211CL, 0xDE478BA4L,
+        0x31035088L, 0xEC46FA30L, 0x8E647309L, 0x5321D9B1L,
+        0x4A21617BL, 0x9764CBC3L, 0xF54642FAL, 0x2803E842L
+    }
+};
 
 uint32_t crc32c(uint32_t crc, const uint8_t* data, unsigned int length) {
+  while (length && ((uintptr_t)data & (sizeof(uint32_t) - 1))) {
+    crc = crc32c_table[0][(crc ^ *data++) & 0xFF] ^ (crc >> 8);
+    length--;
+  }
+
+  while (length >= 4) {
+    uint32_t word = *(const uint32_t*)data;
+#if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+    word = __builtin_bswap32(word);
+#endif
+    crc ^= word;
+    crc = crc32c_table[3][crc & 0xFF] ^
+          crc32c_table[2][(crc >> 8) & 0xFF] ^
+          crc32c_table[1][(crc >> 16) & 0xFF] ^
+          crc32c_table[0][crc >> 24];
+    data += 4;
+    length -= 4;
+  }
+
   while (length--) {
-    crc = crc32c_table[(crc ^ *data++) & 0xFFL] ^ (crc >> 8);
+    crc = crc32c_table[0][(crc ^ *data++) & 0xFF] ^ (crc >> 8);
   }
   return crc ^ 0xffffffff;
 }
@@ -89,14 +308,114 @@ static uint32_t sctp_get_checksum(Sctp* sctp, const uint8_t* buf, size_t len) {
 static int sctp_outgoing_data_cb(void* userdata, void* buf, size_t len, uint8_t tos, uint8_t set_df) {
   Sctp* sctp = (Sctp*)userdata;
 
-  dtls_srtp_write(sctp->dtls_srtp, buf, len);
-  return 0;
+  return dtls_srtp_write(sctp->dtls_srtp, buf, len) < 0 ? -1 : 0;
 }
 
-int sctp_outgoing_data(Sctp* sctp, char* buf, size_t len, SctpDataPpid ppid, uint16_t sid) {
+#if !CONFIG_USE_USRSCTP
+static int sctp_outgoing_data_internal(Sctp* sctp, uint8_t* buf, size_t len,
+                                       size_t headroom, size_t tailroom,
+                                       SctpDataPpid ppid, uint16_t sid,
+                                       int zero_copy) {
+  const size_t header_size = sizeof(SctpPacket) + sizeof(SctpDataChunk);
+  size_t payload_max;
+  size_t final_payload_len;
+  size_t packet_len;
+  size_t payload_len;
+  size_t pos = 0;
+  size_t remaining = len;
+  static uint16_t sqn = 0;
+  uint16_t message_sqn;
+
+  if (SCTP_MTU <= header_size || (SCTP_MTU & 3) != 0) {
+    return -1;
+  }
+  if (len == 0) {
+    return 0;
+  }
+  if (buf == NULL) {
+    return -1;
+  }
+  payload_max = SCTP_MTU - header_size;
+  if (zero_copy) {
+    if (headroom < header_size ||
+        (uintptr_t)buf < header_size ||
+        (((uintptr_t)buf - header_size) & (sizeof(uint32_t) - 1)) != 0) {
+      return -1;
+    }
+    final_payload_len = len % payload_max;
+    if (final_payload_len == 0) {
+      final_payload_len = payload_max;
+    }
+    packet_len = header_size + final_payload_len;
+    if (((4 - (packet_len & 3)) & 3) > tailroom) {
+      return -1;
+    }
+  }
+
+  message_sqn = sqn++;
+  while (remaining > 0) {
+    SctpPacket* packet;
+    SctpDataChunk* chunk;
+
+    payload_len = remaining > payload_max ? payload_max : remaining;
+    if (zero_copy) {
+      packet = (SctpPacket*)(buf + pos - header_size);
+    } else {
+      packet = (SctpPacket*)sctp->buf;
+    }
+    chunk = (SctpDataChunk*)packet->chunks;
+
+    packet->header.source_port = htons(sctp->local_port);
+    packet->header.destination_port = htons(sctp->remote_port);
+    packet->header.verification_tag = sctp->verification_tag;
+    packet->header.checksum = 0;
+
+    chunk->type = SCTP_DATA;
+    chunk->iube = 0x04;
+    if (pos == 0) {
+      chunk->iube |= 0x02;
+    }
+    if (payload_len == remaining) {
+      chunk->iube |= 0x01;
+    }
+    chunk->length = htons(payload_len + sizeof(SctpDataChunk));
+    chunk->tsn = htonl(sctp->tsn++);
+    chunk->sid = htons(sid);
+    chunk->sqn = htons(message_sqn);
+    chunk->ppid = htonl(ppid);
+
+    if (!zero_copy) {
+      memcpy(chunk->data, buf + pos, payload_len);
+    }
+    packet_len = header_size + payload_len;
+    if ((packet_len & 3) != 0) {
+      size_t padded_len = (packet_len + 3) & ~(size_t)3;
+      memset((uint8_t*)packet + packet_len, 0, padded_len - packet_len);
+      packet_len = padded_len;
+    }
+    packet->header.checksum =
+        sctp_get_checksum(sctp, (const uint8_t*)packet, packet_len);
+
+    if (sctp_outgoing_data_cb(sctp, packet, packet_len, 0, 0) < 0) {
+      return -1;
+    }
+    pos += payload_len;
+    remaining -= payload_len;
+  }
+  return (int)len;
+}
+#endif
+
+int sctp_outgoing_data(Sctp* sctp, char* buf, size_t len,
+                       SctpDataPpid ppid, uint16_t sid,
+                       SctpDataMode mode, size_t headroom, size_t tailroom) {
 #if CONFIG_USE_USRSCTP
   int res;
   struct sctp_sendv_spa spa = {0};
+
+  (void)mode;
+  (void)headroom;
+  (void)tailroom;
 
   spa.sendv_flags = SCTP_SEND_SNDINFO_VALID;
 
@@ -110,54 +429,11 @@ int sctp_outgoing_data(Sctp* sctp, char* buf, size_t len, SctpDataPpid ppid, uin
   }
   return res;
 #else
-  size_t padding_len = 0;
-  size_t payload_max = SCTP_MTU - sizeof(SctpPacket) - sizeof(SctpDataChunk);
-  size_t pos = 0;
-  static uint16_t sqn = 0;
-
-  SctpPacket* packet = (SctpPacket*)(sctp->buf);
-  SctpDataChunk* chunk = (SctpDataChunk*)(packet->chunks);
-
-  packet->header.source_port = htons(sctp->local_port);
-  packet->header.destination_port = htons(sctp->remote_port);
-  packet->header.verification_tag = sctp->verification_tag;
-
-  chunk->type = SCTP_DATA;
-  chunk->iube = 0x06;
-  chunk->sid = htons(sid);
-  chunk->sqn = htons(sqn++);
-  chunk->ppid = htonl(ppid);
-
-  while (len > payload_max) {
-    chunk->length = htons(payload_max + sizeof(SctpDataChunk));
-    chunk->tsn = htonl(sctp->tsn++);
-    memcpy(chunk->data, buf + pos, payload_max);
-    packet->header.checksum = 0;
-
-    packet->header.checksum = sctp_get_checksum(sctp, (const uint8_t*)sctp->buf, SCTP_MTU);
-
-    sctp_outgoing_data_cb(sctp, sctp->buf, SCTP_MTU, 0, 0);
-    chunk->iube = 0x04;
-    len -= payload_max;
-    pos += payload_max;
-  }
-
-  if (len > 0) {
-    chunk->length = htons(len + sizeof(SctpDataChunk));
-    chunk->iube++;
-    chunk->tsn = htonl(sctp->tsn++);
-    memset(chunk->data, 0, payload_max);
-    memcpy(chunk->data, buf + pos, len);
-    packet->header.checksum = 0;
-
-    padding_len = 4 * ((len + sizeof(SctpDataChunk) + sizeof(SctpPacket) + 3) / 4);
-
-    packet->header.checksum = sctp_get_checksum(sctp, (const uint8_t*)sctp->buf, padding_len);
-
-    sctp_outgoing_data_cb(sctp, sctp->buf, padding_len, 0, 0);
-  }
+  return sctp_outgoing_data_internal(sctp, (uint8_t*)buf, len,
+                                     headroom, tailroom,
+                                     ppid, sid,
+                                     mode == SCTP_DATA_ZERO_COPY);
 #endif
-  return len;
 }
 
 void sctp_add_stream_mapping(Sctp* sctp, const char* label, uint16_t sid) {
@@ -190,7 +466,8 @@ static int sctp_store_data_channel_open(Sctp* sctp, uint16_t sid,
 void sctp_parse_data_channel_open(Sctp* sctp, uint16_t sid, char* data, size_t length) {
   if (sctp_store_data_channel_open(sctp, sid, data, length) == 0) {
     char ack = DATA_CHANNEL_ACK;
-    sctp_outgoing_data(sctp, &ack, 1, DATA_CHANNEL_PPID_CONTROL, sid);
+    sctp_outgoing_data(sctp, &ack, 1, DATA_CHANNEL_PPID_CONTROL, sid,
+                       SCTP_DATA_COPY, 0, 0);
   }
 }
 
@@ -241,6 +518,7 @@ void sctp_incoming_data(Sctp* sctp, char* buf, size_t len) {
   // prepare outgoing packet
   memset(sctp->buf, 0, sizeof(sctp->buf));
   while ((4 * (pos + 3) / 4) < len) {
+    length = 0;
     chunk_common = (SctpChunkCommon*)(buf + pos);
 
     switch (chunk_common->type) {
@@ -384,6 +662,25 @@ void sctp_incoming_data(Sctp* sctp, char* buf, size_t len) {
         }
         break;
       }
+      case SCTP_HEARTBEAT: {
+        uint16_t heartbeat_length = ntohs(chunk_common->length);
+        SctpChunkCommon* heartbeat_ack = (SctpChunkCommon*)out_packet->chunks;
+
+        if (heartbeat_length < sizeof(SctpChunkCommon) ||
+            heartbeat_length > sizeof(sctp->buf) - sizeof(SctpHeader) ||
+            pos + heartbeat_length > len) {
+          LOGW("Invalid SCTP HEARTBEAT length %u", heartbeat_length);
+          return;
+        }
+
+        memcpy(heartbeat_ack, chunk_common, heartbeat_length);
+        heartbeat_ack->type = SCTP_HEARTBEAT_ACK;
+        heartbeat_ack->flags = 0;
+        length = sizeof(SctpHeader) + heartbeat_length;
+      } break;
+      case SCTP_HEARTBEAT_ACK:
+        LOGD("SCTP_HEARTBEAT_ACK");
+        break;
       case SCTP_ABORT:
         sctp->connected = 0;
         if (sctp->onclose) {

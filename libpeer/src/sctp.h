@@ -140,6 +140,13 @@ typedef enum SctpDataPpid {
 
 } SctpDataPpid;
 
+typedef enum SctpDataMode {
+
+  SCTP_DATA_COPY,
+  SCTP_DATA_ZERO_COPY
+
+} SctpDataMode;
+
 #define SCTP_MAX_STREAMS 5
 
 typedef struct {
@@ -180,7 +187,9 @@ int sctp_is_connected(Sctp* sctp);
 
 void sctp_incoming_data(Sctp* sctp, char* buf, size_t len);
 
-int sctp_outgoing_data(Sctp* sctp, char* buf, size_t len, SctpDataPpid ppid, uint16_t sid);
+int sctp_outgoing_data(Sctp* sctp, char* buf, size_t len,
+                       SctpDataPpid ppid, uint16_t sid,
+                       SctpDataMode mode, size_t headroom, size_t tailroom);
 
 void sctp_onmessage(Sctp* sctp, void (*onmessage)(char* msg, size_t len, void* userdata, uint16_t sid));
 

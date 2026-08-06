@@ -121,6 +121,18 @@ int peer_connection_create_datachannel_sid(PeerConnection* pc, DecpChannelType c
  */
 int peer_connection_datachannel_send(PeerConnection* pc, char* message, size_t len);
 
+/**
+ * @brief packetize and send a message in place
+ *
+ * The SCTP layer does not copy the payload into its packet buffer. The message
+ * buffer must provide writable space before and after the payload; its contents
+ * are consumed and may be modified before this function returns.
+ */
+int peer_connection_datachannel_send_inplace(PeerConnection* pc,
+                                             uint8_t* message, size_t len,
+                                             size_t headroom,
+                                             size_t tailroom);
+
 int peer_connection_datachannel_send_sid(PeerConnection* pc, char* message, size_t len, uint16_t sid);
 
 int peer_connection_send_audio(PeerConnection* pc, const uint8_t* packet, size_t bytes);

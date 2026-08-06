@@ -281,15 +281,33 @@ int peer_connection_datachannel_send(PeerConnection* pc, char* message, size_t l
   return peer_connection_datachannel_send_sid(pc, message, len, sid);
 }
 
+int peer_connection_datachannel_send_inplace(PeerConnection* pc,
+                                             uint8_t* message, size_t len,
+                                             size_t headroom,
+                                             size_t tailroom) {
+  uint16_t sid = pc->sctp.stream_count > 0 ? pc->sctp.stream_table[0].sid : 0;
+
+  if (!sctp_is_connected(&pc->sctp)) {
+    LOGE("sctp not connected");
+    return -1;
+  }
+  return sctp_outgoing_data(
+      &pc->sctp, (char*)message, len,
+      pc->config.datachannel == DATA_CHANNEL_STRING ? PPID_STRING : PPID_BINARY,
+      sid, SCTP_DATA_ZERO_COPY, headroom, tailroom);
+}
+
 int peer_connection_datachannel_send_sid(PeerConnection* pc, char* message, size_t len, uint16_t sid) {
   if (!sctp_is_connected(&pc->sctp)) {
     LOGE("sctp not connected");
     return -1;
   }
   if (pc->config.datachannel == DATA_CHANNEL_STRING)
-    return sctp_outgoing_data(&pc->sctp, message, len, PPID_STRING, sid);
+    return sctp_outgoing_data(&pc->sctp, message, len, PPID_STRING, sid,
+                              SCTP_DATA_COPY, 0, 0);
   else
-    return sctp_outgoing_data(&pc->sctp, message, len, PPID_BINARY, sid);
+    return sctp_outgoing_data(&pc->sctp, message, len, PPID_BINARY, sid,
+                              SCTP_DATA_COPY, 0, 0);
 }
 
 int peer_connection_create_datachannel(PeerConnection* pc, DecpChannelType channel_type, uint16_t priority, uint32_t reliability_parameter, char* label, char* protocol) {
@@ -339,7 +357,8 @@ int peer_connection_create_datachannel_sid(PeerConnection* pc, DecpChannelType c
   memcpy(msg + 12, label, strlen(label));
   memcpy(msg + 12 + strlen(label), protocol, strlen(protocol));
 
-  rtrn = sctp_outgoing_data(&pc->sctp, msg, msg_size, PPID_CONTROL, sid);
+  rtrn = sctp_outgoing_data(&pc->sctp, msg, msg_size, PPID_CONTROL, sid,
+                            SCTP_DATA_COPY, 0, 0);
   free(msg);
   return rtrn;
 }
