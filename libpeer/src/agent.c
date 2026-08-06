@@ -642,14 +642,36 @@ int agent_recv(Agent* agent, uint8_t* buf, int len, int* packet_consumed) {
   return ret;
 }
 
+int agent_add_remote_candidate(Agent* agent, char* description, char* end) {
+  IceCandidate candidate = {0};
+  int i;
+
+  if (ice_candidate_from_description(&candidate, description, end) != 0) {
+    return -1;
+  }
+
+  for (i = 0; i < agent->remote_candidates_count; i++) {
+    if (strcmp(agent->remote_candidates[i].foundation,
+               candidate.foundation) == 0) {
+      return 0;
+    }
+  }
+
+  if (agent->remote_candidates_count >= AGENT_MAX_CANDIDATES) {
+    LOGW("ICE remote candidate limit reached");
+    return -1;
+  }
+
+  agent->remote_candidates[agent->remote_candidates_count++] = candidate;
+  return 0;
+}
+
 void agent_set_remote_description(Agent* agent, char* description) {
   /*
   a=ice-ufrag:Iexb
   a=ice-pwd:IexbSoY7JulyMbjKwISsG9
   a=candidate:1 1 UDP 1 36.231.28.50 38143 typ srflx
   */
-  int i;
-
   LOGD("Set remote description:\n%s", description);
 
   char* line_start = description;
@@ -663,16 +685,7 @@ void agent_set_remote_description(Agent* agent, char* description) {
       strncpy(agent->remote_upwd, line_start + strlen("a=ice-pwd:"), line_end - line_start - strlen("a=ice-pwd:"));
 
     } else if (strncmp(line_start, "a=candidate:", strlen("a=candidate:")) == 0) {
-      if (ice_candidate_from_description(&agent->remote_candidates[agent->remote_candidates_count], line_start, line_end) == 0) {
-        for (i = 0; i < agent->remote_candidates_count; i++) {
-          if (strcmp(agent->remote_candidates[i].foundation, agent->remote_candidates[agent->remote_candidates_count].foundation) == 0) {
-            break;
-          }
-        }
-        if (i == agent->remote_candidates_count) {
-          agent->remote_candidates_count++;
-        }
-      }
+      agent_add_remote_candidate(agent, line_start, line_end);
     }
 
     line_start = line_end + 2;

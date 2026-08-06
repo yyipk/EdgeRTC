@@ -89,6 +89,8 @@ int agent_recv(Agent* agent, uint8_t* buf, int len, int* packet_consumed);
 
 void agent_set_remote_description(Agent* agent, char* description);
 
+int agent_add_remote_candidate(Agent* agent, char* description, char* end);
+
 int agent_select_candidate_pair(Agent* agent);
 
 int agent_connectivity_check(Agent* agent);
