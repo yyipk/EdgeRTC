@@ -49,6 +49,7 @@ struct IceCandidatePair {
   IceCandidate* local;
   IceCandidate* remote;
   int conncheck;
+  int nominated;
   uint64_t priority;
 };
 
