@@ -305,6 +305,30 @@ static uint32_t sctp_get_checksum(Sctp* sctp, const uint8_t* buf, size_t len) {
   return crc;
 }
 
+#if !CONFIG_USE_USRSCTP
+static SctpChunkParam* sctp_find_init_param(SctpInitChunk* init,
+                                            uint16_t type) {
+  uint16_t chunk_length = ntohs(init->common.length);
+  size_t pos = sizeof(SctpInitChunk);
+
+  while (pos + sizeof(SctpChunkParam) <= chunk_length) {
+    SctpChunkParam* param = (SctpChunkParam*)((uint8_t*)init + pos);
+    uint16_t param_length = ntohs(param->length);
+
+    if (param_length < sizeof(SctpChunkParam) ||
+        pos + param_length > chunk_length) {
+      return NULL;
+    }
+    if (ntohs(param->type) == type) {
+      return param;
+    }
+    pos += (param_length + 3U) & ~3U;
+  }
+  return NULL;
+}
+
+#endif
+
 static int sctp_outgoing_data_cb(void* userdata, void* buf, size_t len, uint8_t tos, uint8_t set_df) {
   Sctp* sctp = (Sctp*)userdata;
 
@@ -486,7 +510,7 @@ void sctp_handle_sctp_packet(Sctp* sctp, char* buf, size_t len) {
 }
 
 void sctp_incoming_data(Sctp* sctp, char* buf, size_t len) {
-  if (!sctp)
+  if (!sctp || !buf)
     return;
 
 #if CONFIG_USE_USRSCTP
@@ -498,6 +522,10 @@ void sctp_incoming_data(Sctp* sctp, char* buf, size_t len) {
   SctpChunkCommon* chunk_common;
   SctpPacket* in_packet = (SctpPacket*)buf;
   SctpPacket* out_packet = (SctpPacket*)sctp->buf;
+
+  if (len < sizeof(SctpHeader)) {
+    return;
+  }
 
   // Header
 #if 0
@@ -517,14 +545,38 @@ void sctp_incoming_data(Sctp* sctp, char* buf, size_t len) {
 
   // prepare outgoing packet
   memset(sctp->buf, 0, sizeof(sctp->buf));
-  while ((4 * (pos + 3) / 4) < len) {
+  while (pos < len) {
+    size_t remaining = len - pos;
+    size_t chunk_length;
+    size_t padded_length;
+    int stop_processing = 0;
+
+    if (remaining < sizeof(SctpChunkCommon)) {
+      return;
+    }
+
     length = 0;
     chunk_common = (SctpChunkCommon*)(buf + pos);
+    chunk_length = ntohs(chunk_common->length);
+    if (chunk_length < sizeof(SctpChunkCommon) ||
+        chunk_length > remaining) {
+      return;
+    }
+    padded_length = (chunk_length + 3U) & ~(size_t)3U;
+    if (padded_length > remaining) {
+      return;
+    }
 
     switch (chunk_common->type) {
       case SCTP_DATA: {
         SctpDataChunk* data_chunk = (SctpDataChunk*)(buf + pos);
         SctpSackChunk* sack_chunk = (SctpSackChunk*)out_packet->chunks;
+        size_t data_length;
+
+        if (chunk_length < sizeof(SctpDataChunk)) {
+          return;
+        }
+        data_length = chunk_length - sizeof(SctpDataChunk);
 
         sack_chunk->common.type = SCTP_SACK;
         sack_chunk->common.flags = 0x00;
@@ -533,12 +585,13 @@ void sctp_incoming_data(Sctp* sctp, char* buf, size_t len) {
         sack_chunk->a_rwnd = htonl(0x02);
         length = ntohs(sack_chunk->common.length) + sizeof(SctpHeader);
 
-        LOGD("SCTP_DATA. ppid = %ld, data = %.2x", ntohl(data_chunk->ppid), data_chunk->data[0]);
-        if (ntohl(data_chunk->ppid) == DATA_CHANNEL_PPID_CONTROL && data_chunk->data[0] == DATA_CHANNEL_OPEN) {
+        LOGD("SCTP_DATA. ppid = %ld, data = %.2x", ntohl(data_chunk->ppid), data_length > 0 ? data_chunk->data[0] : 0);
+        if (ntohl(data_chunk->ppid) == DATA_CHANNEL_PPID_CONTROL &&
+            data_length > 0 && data_chunk->data[0] == DATA_CHANNEL_OPEN) {
           uint16_t sid = ntohs(data_chunk->sid);
           sctp_store_data_channel_open(
               sctp, sid, (char*)data_chunk->data,
-              ntohs(data_chunk->length) - sizeof(SctpDataChunk));
+              data_length);
           data_chunk = (SctpDataChunk*)sack_chunk->blocks;
           data_chunk->type = SCTP_DATA;
           data_chunk->iube = 0x03;
@@ -551,17 +604,20 @@ void sctp_incoming_data(Sctp* sctp, char* buf, size_t len) {
           length += ntohs(data_chunk->length);
         } else if (ntohl(data_chunk->ppid) == DATA_CHANNEL_PPID_DOMSTRING || ntohl(data_chunk->ppid) == DATA_CHANNEL_PPID_BINARY) {
           if (sctp->onmessage) {
-            sctp->onmessage((char*)data_chunk->data, ntohs(data_chunk->length) - sizeof(SctpDataChunk),
+            sctp->onmessage((char*)data_chunk->data, data_length,
                             sctp->userdata, ntohs(data_chunk->sid));
           }
         }
-        pos = len;  // Do not handle other msg
+        stop_processing = 1;  // Do not handle other msg
       } break;
       case SCTP_INIT: {
         LOGD("SCTP_INIT");
 
-        SctpInitChunk* init_chunk;
-        init_chunk = (SctpInitChunk*)in_packet->chunks;
+        SctpInitChunk* init_chunk = (SctpInitChunk*)(buf + pos);
+
+        if (chunk_length < sizeof(SctpInitChunk)) {
+          return;
+        }
         sctp->verification_tag = init_chunk->initiate_tag;
 
         SctpInitChunk* init_ack = (SctpInitChunk*)out_packet->chunks;
@@ -582,21 +638,17 @@ void sctp_incoming_data(Sctp* sctp, char* buf, size_t len) {
         length = ntohs(init_ack->common.length) + sizeof(SctpHeader);
       } break;
       case SCTP_INIT_ACK: {
-        SctpInitChunk* init_ack = (SctpInitChunk*)in_packet->chunks;
+        SctpInitChunk* init_ack = (SctpInitChunk*)(buf + pos);
         SctpCookieEchoChunk* cookie_echo = (SctpCookieEchoChunk*)out_packet->chunks;
-        SctpChunkParam* param = NULL;
+        SctpChunkParam* param;
+
+        if (chunk_length < sizeof(SctpInitChunk)) {
+          return;
+        }
         sctp->verification_tag = init_ack->initiate_tag;
-        int type;
-        // find cookie
-        uint8_t* cookie = NULL;
-        cookie = (uint8_t*)&init_ack->param[0];
-        for (int i = 0; i < init_ack->common.length - 20; i += 2) {
-          type = ntohs(*(uint16_t*)&cookie[i]);
-          // find cookie param
-          if (type == 0x07) {
-            param = (SctpChunkParam*)&cookie[i];
-            break;
-          }
+        param = sctp_find_init_param(init_ack, SCTP_PARAM_STATE_COOKIE);
+        if (param == NULL) {
+          break;
         }
 
         cookie_echo->common.type = SCTP_COOKIE_ECHO;
@@ -607,7 +659,10 @@ void sctp_incoming_data(Sctp* sctp, char* buf, size_t len) {
         memcpy(cookie_echo->cookie, param->value, ntohs(param->length) - 4);
         length = ntohs(cookie_echo->common.length) + sizeof(SctpHeader);
       } break;
-      case SCTP_SACK:
+      case SCTP_SACK: {
+        if (chunk_length < sizeof(SctpSackChunk)) {
+          return;
+        }
 #if 0
         LOGD("SCTP_SACK");
         sack = (SctpSackChunk*)in_packet->chunks;
@@ -639,13 +694,14 @@ void sctp_incoming_data(Sctp* sctp, char* buf, size_t len) {
         }
 #endif
         break;
+      }
       case SCTP_COOKIE_ECHO: {
         LOGD("SCTP_COOKIE_ECHO");
         SctpChunkCommon* common = (SctpChunkCommon*)out_packet->chunks;
         common->type = SCTP_COOKIE_ACK;
         common->length = htons(4);
         length = ntohs(common->length) + sizeof(SctpHeader);
-        pos = len;  // Do not handle other msg
+        stop_processing = 1;  // Do not handle other msg
         if (!sctp->connected) {
           sctp->connected = 1;
           if (sctp->onopen) {
@@ -663,20 +719,16 @@ void sctp_incoming_data(Sctp* sctp, char* buf, size_t len) {
         break;
       }
       case SCTP_HEARTBEAT: {
-        uint16_t heartbeat_length = ntohs(chunk_common->length);
         SctpChunkCommon* heartbeat_ack = (SctpChunkCommon*)out_packet->chunks;
 
-        if (heartbeat_length < sizeof(SctpChunkCommon) ||
-            heartbeat_length > sizeof(sctp->buf) - sizeof(SctpHeader) ||
-            pos + heartbeat_length > len) {
-          LOGW("Invalid SCTP HEARTBEAT length %u", heartbeat_length);
+        if (chunk_length > sizeof(sctp->buf) - sizeof(SctpHeader)) {
           return;
         }
 
-        memcpy(heartbeat_ack, chunk_common, heartbeat_length);
+        memcpy(heartbeat_ack, chunk_common, chunk_length);
         heartbeat_ack->type = SCTP_HEARTBEAT_ACK;
         heartbeat_ack->flags = 0;
-        length = sizeof(SctpHeader) + heartbeat_length;
+        length = sizeof(SctpHeader) + chunk_length;
       } break;
       case SCTP_HEARTBEAT_ACK:
         LOGD("SCTP_HEARTBEAT_ACK");
@@ -701,11 +753,17 @@ void sctp_incoming_data(Sctp* sctp, char* buf, size_t len) {
     if (length > 0) {
       // padding 4
       length = (4 * ((length + 3) / 4));
+      if (length > sizeof(sctp->buf)) {
+        return;
+      }
       out_packet->header.checksum = sctp_get_checksum(sctp, sctp->buf, length);
       dtls_srtp_write(sctp->dtls_srtp, sctp->buf, length);
       // sctp_outgoing_data_cb(sctp, sctp->buf, SCTP_MTU, 0, 0);
     }
-    pos += ntohs(chunk_common->length);
+    if (stop_processing) {
+      break;
+    }
+    pos += padded_length;
   }
 #endif
 }
