@@ -1,4 +1,5 @@
 #include <inttypes.h>
+#include <mbedtls/net_sockets.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -131,8 +132,14 @@ static int peer_connection_dtls_srtp_recv(void* ctx, unsigned char* buf, size_t 
     if (ret > 0) {
       break;
     }
+    if (ret < 0) {
+      return MBEDTLS_ERR_NET_RECV_FAILED;
+    }
 
     recv_max++;
+  }
+  if (ret == 0 && pc->state == PEER_CONNECTION_CONNECTED) {
+    return MBEDTLS_ERR_SSL_WANT_READ;
   }
   return ret;
 }
