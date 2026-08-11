@@ -2,6 +2,7 @@
 #include <string.h>
 
 #include "dtls_srtp.h"
+#include "ports.h"
 #include "sctp.h"
 #include "utils.h"
 #if CONFIG_USE_USRSCTP
@@ -306,6 +307,19 @@ static uint32_t sctp_get_checksum(Sctp* sctp, const uint8_t* buf, size_t len) {
 }
 
 #if !CONFIG_USE_USRSCTP
+#define SCTP_FORWARD_RETRY_MS 100U
+#define SCTP_GAP_WAIT_MS 100U
+
+enum {
+  SCTP_FORWARD_STATE_IDLE,
+  SCTP_FORWARD_STATE_GAP_WAIT,
+  SCTP_FORWARD_STATE_PENDING,
+};
+
+static int sctp_tsn_gte(uint32_t lhs, uint32_t rhs) {
+  return (int32_t)(lhs - rhs) >= 0;
+}
+
 static SctpChunkParam* sctp_find_init_param(SctpInitChunk* init,
                                             uint16_t type) {
   uint16_t chunk_length = ntohs(init->common.length);
@@ -336,6 +350,105 @@ static int sctp_outgoing_data_cb(void* userdata, void* buf, size_t len, uint8_t 
 }
 
 #if !CONFIG_USE_USRSCTP
+static int sctp_stream_no_retransmit(Sctp* sctp, uint16_t sid) {
+  int i;
+
+  for (i = 0; i < sctp->stream_count; i++) {
+    if (sctp->stream_table[i].sid == sid) {
+      return sctp->stream_table[i].no_retransmit;
+    }
+  }
+  return 0;
+}
+
+static int sctp_send_forward_tsn(Sctp* sctp, uint32_t now_ms, int force) {
+  SctpPacket* packet;
+  SctpForwardTsnChunk* chunk;
+  size_t packet_length = sizeof(SctpHeader) + sizeof(SctpForwardTsnChunk);
+
+  if (sctp->forward_state != SCTP_FORWARD_STATE_PENDING ||
+      !sctp->peer_supports_forward_tsn) {
+    return 0;
+  }
+  if (!force &&
+      now_ms - sctp->forward_state_since_ms < SCTP_FORWARD_RETRY_MS) {
+    return 0;
+  }
+
+  packet = (SctpPacket*)sctp->buf;
+  chunk = (SctpForwardTsnChunk*)packet->chunks;
+  memset(packet, 0, packet_length);
+  packet->header.source_port = htons(sctp->local_port);
+  packet->header.destination_port = htons(sctp->remote_port);
+  packet->header.verification_tag = sctp->verification_tag;
+  chunk->common.type = SCTP_FORWARD_TSN;
+  chunk->common.length = htons(sizeof(SctpForwardTsnChunk));
+  chunk->new_cumulative_tsn = htonl(sctp->last_pr_tsn);
+  packet->header.checksum = sctp_get_checksum(
+      sctp, (const uint8_t*)packet, packet_length);
+  sctp->forward_state_since_ms = now_ms;
+  return sctp_outgoing_data_cb(sctp, packet, packet_length, 0, 0);
+}
+
+static void sctp_start_forward_tsn(Sctp* sctp, uint32_t now_ms) {
+  if (!sctp->peer_supports_forward_tsn) {
+    return;
+  }
+  sctp->forward_state = SCTP_FORWARD_STATE_PENDING;
+  sctp->forward_state_since_ms = 0;
+  sctp_send_forward_tsn(sctp, now_ms, 1);
+}
+
+static void sctp_handle_sack(Sctp* sctp, SctpSackChunk* sack,
+                             size_t available_length) {
+  uint16_t sack_length = ntohs(sack->common.length);
+  uint16_t gap_blocks;
+  uint16_t duplicate_tsns;
+  uint32_t cumulative_tsn_ack;
+  uint32_t now_ms;
+  size_t blocks_length;
+
+  if (sack_length < sizeof(SctpSackChunk) ||
+      sack_length > available_length) {
+    return;
+  }
+  gap_blocks = ntohs(sack->number_of_gap_ack_blocks);
+  duplicate_tsns = ntohs(sack->number_of_dup_tsns);
+  blocks_length = (size_t)gap_blocks * 4U +
+                  (size_t)duplicate_tsns * sizeof(uint32_t);
+  if (blocks_length > sack_length - sizeof(SctpSackChunk)) {
+    return;
+  }
+
+  cumulative_tsn_ack = ntohl(sack->cumulative_tsn_ack);
+  now_ms = ports_get_epoch_time();
+
+  if (sctp->forward_state == SCTP_FORWARD_STATE_PENDING) {
+    if (sctp_tsn_gte(cumulative_tsn_ack, sctp->last_pr_tsn)) {
+      sctp->forward_state = SCTP_FORWARD_STATE_IDLE;
+    } else {
+      sctp_send_forward_tsn(sctp, now_ms, 0);
+    }
+    return;
+  }
+
+  if (gap_blocks == 0 ||
+      sctp_tsn_gte(cumulative_tsn_ack, sctp->last_pr_tsn)) {
+    sctp->forward_state = SCTP_FORWARD_STATE_IDLE;
+    return;
+  }
+  if (sctp->forward_state != SCTP_FORWARD_STATE_GAP_WAIT ||
+      cumulative_tsn_ack != sctp->gap_cumulative_tsn) {
+    sctp->forward_state = SCTP_FORWARD_STATE_GAP_WAIT;
+    sctp->gap_cumulative_tsn = cumulative_tsn_ack;
+    sctp->forward_state_since_ms = now_ms;
+    return;
+  }
+  if (now_ms - sctp->forward_state_since_ms >= SCTP_GAP_WAIT_MS) {
+    sctp_start_forward_tsn(sctp, now_ms);
+  }
+}
+
 static int sctp_outgoing_data_internal(Sctp* sctp, uint8_t* buf, size_t len,
                                        size_t headroom, size_t tailroom,
                                        SctpDataPpid ppid, uint16_t sid,
@@ -349,6 +462,15 @@ static int sctp_outgoing_data_internal(Sctp* sctp, uint8_t* buf, size_t len,
   size_t remaining = len;
   static uint16_t sqn = 0;
   uint16_t message_sqn;
+  int send_ret;
+  int no_retransmit = ppid != PPID_CONTROL &&
+                      sctp_stream_no_retransmit(sctp, sid);
+
+  if (no_retransmit &&
+      sctp->forward_state == SCTP_FORWARD_STATE_PENDING) {
+    sctp_send_forward_tsn(sctp, ports_get_epoch_time(), 0);
+    return -1;
+  }
 
   if (SCTP_MTU <= header_size || (SCTP_MTU & 3) != 0) {
     return -1;
@@ -404,6 +526,9 @@ static int sctp_outgoing_data_internal(Sctp* sctp, uint8_t* buf, size_t len,
     }
     chunk->length = htons(payload_len + sizeof(SctpDataChunk));
     chunk->tsn = htonl(sctp->tsn++);
+    if (no_retransmit) {
+      sctp->last_pr_tsn = ntohl(chunk->tsn);
+    }
     chunk->sid = htons(sid);
     chunk->sqn = htons(message_sqn);
     chunk->ppid = htonl(ppid);
@@ -420,7 +545,11 @@ static int sctp_outgoing_data_internal(Sctp* sctp, uint8_t* buf, size_t len,
     packet->header.checksum =
         sctp_get_checksum(sctp, (const uint8_t*)packet, packet_len);
 
-    if (sctp_outgoing_data_cb(sctp, packet, packet_len, 0, 0) < 0) {
+    send_ret = sctp_outgoing_data_cb(sctp, packet, packet_len, 0, 0);
+    if (send_ret < 0) {
+      if (no_retransmit) {
+        sctp_start_forward_tsn(sctp, ports_get_epoch_time());
+      }
       return -1;
     }
     pos += payload_len;
@@ -460,10 +589,12 @@ int sctp_outgoing_data(Sctp* sctp, char* buf, size_t len,
 #endif
 }
 
-void sctp_add_stream_mapping(Sctp* sctp, const char* label, uint16_t sid) {
+void sctp_add_stream_mapping(Sctp* sctp, const char* label, uint16_t sid,
+                             uint8_t no_retransmit) {
   if (sctp->stream_count < SCTP_MAX_STREAMS) {
     strncpy(sctp->stream_table[sctp->stream_count].label, label, sizeof(sctp->stream_table[sctp->stream_count].label));
     sctp->stream_table[sctp->stream_count].sid = sid;
+    sctp->stream_table[sctp->stream_count].no_retransmit = no_retransmit;
     sctp->stream_count++;
   } else
     LOGE("Stream table full. Cannot add more streams.");
@@ -471,6 +602,8 @@ void sctp_add_stream_mapping(Sctp* sctp, const char* label, uint16_t sid) {
 
 static int sctp_store_data_channel_open(Sctp* sctp, uint16_t sid,
                                         char* data, size_t length) {
+  uint32_t reliability_parameter;
+
   if (length < 12 || data[0] != DATA_CHANNEL_OPEN)
     return -1;
 
@@ -483,7 +616,10 @@ static int sctp_store_data_channel_open(Sctp* sctp, uint16_t sid,
   memcpy(label, data + 12, label_length);
   label[label_length] = '\0';
   printf("DATA_CHANNEL_OPEN: Label=%s, sid=%d\n", label, sid);
-  sctp_add_stream_mapping(sctp, label, sid);
+  memcpy(&reliability_parameter, data + 4, sizeof(reliability_parameter));
+  sctp_add_stream_mapping(
+      sctp, label, sid,
+      (uint8_t)data[1] == 0x81 && ntohl(reliability_parameter) == 0);
   return 0;
 }
 
@@ -619,11 +755,14 @@ void sctp_incoming_data(Sctp* sctp, char* buf, size_t len) {
           return;
         }
         sctp->verification_tag = init_chunk->initiate_tag;
+        sctp->peer_supports_forward_tsn =
+            sctp_find_init_param(init_chunk,
+                                 SCTP_PARAM_FORWARD_TSN_SUPPORTED) != NULL;
 
         SctpInitChunk* init_ack = (SctpInitChunk*)out_packet->chunks;
         init_ack->common.type = SCTP_INIT_ACK;
         init_ack->common.flags = 0x00;
-        init_ack->common.length = htons(20 + 8);
+        init_ack->common.length = htons(20 + 8 + 4);
         init_ack->initiate_tag = htonl(0x12345678);
         init_ack->a_rwnd = htonl(0x100000);
         init_ack->number_of_outbound_streams = 0xffff;
@@ -635,6 +774,10 @@ void sctp_incoming_data(Sctp* sctp, char* buf, size_t len) {
         param->type = htons(SCTP_PARAM_STATE_COOKIE);
         param->length = htons(8);
         *(uint32_t*)&param->value = htonl(0x02);
+
+        param = (SctpChunkParam*)((uint8_t*)param + 8);
+        param->type = htons(SCTP_PARAM_FORWARD_TSN_SUPPORTED);
+        param->length = htons(4);
         length = ntohs(init_ack->common.length) + sizeof(SctpHeader);
       } break;
       case SCTP_INIT_ACK: {
@@ -646,6 +789,9 @@ void sctp_incoming_data(Sctp* sctp, char* buf, size_t len) {
           return;
         }
         sctp->verification_tag = init_ack->initiate_tag;
+        sctp->peer_supports_forward_tsn =
+            sctp_find_init_param(init_ack,
+                                 SCTP_PARAM_FORWARD_TSN_SUPPORTED) != NULL;
         param = sctp_find_init_param(init_ack, SCTP_PARAM_STATE_COOKIE);
         if (param == NULL) {
           break;
@@ -660,9 +806,12 @@ void sctp_incoming_data(Sctp* sctp, char* buf, size_t len) {
         length = ntohs(cookie_echo->common.length) + sizeof(SctpHeader);
       } break;
       case SCTP_SACK: {
+        SctpSackChunk* sack = (SctpSackChunk*)(buf + pos);
+
         if (chunk_length < sizeof(SctpSackChunk)) {
           return;
         }
+        sctp_handle_sack(sctp, sack, chunk_length);
 #if 0
         LOGD("SCTP_SACK");
         sack = (SctpSackChunk*)in_packet->chunks;
@@ -862,6 +1011,11 @@ int sctp_create_association(Sctp* sctp, DtlsSrtp* dtls_srtp) {
   sctp->local_port = 5000;
   sctp->remote_port = 5000;
   sctp->tsn = 1234;
+#if !CONFIG_USE_USRSCTP
+  sctp->last_pr_tsn = sctp->tsn - 1;
+  sctp->peer_supports_forward_tsn = 0;
+  sctp->forward_state = SCTP_FORWARD_STATE_IDLE;
+#endif
 #if CONFIG_USE_USRSCTP
   int ret = -1;
   usrsctp_sysctl_set_sctp_ecn_enable(0);
@@ -962,6 +1116,7 @@ int sctp_create_association(Sctp* sctp, DtlsSrtp* dtls_srtp) {
   // send SCTP_INIT
   int length = 0;
   SctpInitChunk* init_chunk;
+  SctpChunkParam* param;
   SctpHeader* header;
   SctpPacket* out_packet = (SctpPacket*)sctp->buf;
   header = &out_packet->header;
@@ -970,14 +1125,18 @@ int sctp_create_association(Sctp* sctp, DtlsSrtp* dtls_srtp) {
   header->source_port = htons(sctp->local_port);
   header->destination_port = htons(sctp->remote_port);
   header->verification_tag = 0x0;
+  header->checksum = 0;
   init_chunk->common.type = SCTP_INIT;
   init_chunk->common.flags = 0x00;
-  init_chunk->common.length = htons(20);
+  init_chunk->common.length = htons(20 + 4);
   init_chunk->initiate_tag = htonl(0x12345678);
   init_chunk->a_rwnd = htonl(0x100000);
   init_chunk->number_of_outbound_streams = 0xffff;
   init_chunk->number_of_inbound_streams = 0xffff;
   init_chunk->initial_tsn = htonl(sctp->tsn);
+  param = init_chunk->param;
+  param->type = htons(SCTP_PARAM_FORWARD_TSN_SUPPORTED);
+  param->length = htons(4);
   length = ntohs(init_chunk->common.length) + sizeof(SctpHeader);
   length = (4 * ((length + 3) / 4));
   header->checksum = sctp_get_checksum(sctp, sctp->buf, length);

@@ -34,6 +34,7 @@ typedef struct SctpChunkParam {
 typedef enum SctpParamType {
 
   SCTP_PARAM_STATE_COOKIE = 7,
+  SCTP_PARAM_FORWARD_TSN_SUPPORTED = 0xc000,
 
 } SctpParamType;
 
@@ -71,8 +72,6 @@ typedef struct SctpChunkCommon {
 typedef struct SctpForwardTsnChunk {
   SctpChunkCommon common;
   uint32_t new_cumulative_tsn;
-  uint16_t stream_number;
-  uint16_t stream_sequence_number;
 
 } SctpForwardTsnChunk;
 
@@ -152,6 +151,7 @@ typedef enum SctpDataMode {
 typedef struct {
   char label[32];  // Stream label
   uint16_t sid;    // Stream ID
+  uint8_t no_retransmit;
 } SctpStreamEntry;
 
 typedef struct Sctp {
@@ -173,6 +173,14 @@ typedef struct Sctp {
 
   void* userdata;
   uint8_t buf[CONFIG_MTU];
+
+#if !CONFIG_USE_USRSCTP
+  uint32_t last_pr_tsn;
+  uint32_t gap_cumulative_tsn;
+  uint32_t forward_state_since_ms;
+  uint8_t peer_supports_forward_tsn;
+  uint8_t forward_state;
+#endif
 } Sctp;
 
 int sctp_create_association(Sctp* sctp, DtlsSrtp* dtls_srtp);
