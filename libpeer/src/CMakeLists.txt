@@ -1,14 +1,14 @@
 project(lib)
 
 file(GLOB SRCS "*.c")
+list(FILTER SRCS EXCLUDE REGEX "/peer_(http|mqtt)_(core|external)\\.c$")
+list(APPEND SRCS ${PEER_SIGNALING_BACKEND_SOURCES})
 
 file(GLOB HEADERS "peer.h" "peer_connection.h" "peer_signaling.h")
 
 add_library(peer
   ${SRCS}
-  ${HTTP_SOURCES}
-  ${MQTT_SOURCES}
-  ${MQTT_SERIALIZER_SOURCES}
+  ${PEER_SIGNALING_PROTOCOL_SOURCES}
 )
 
 include_directories(peer PUBLIC
@@ -26,4 +26,3 @@ install(TARGETS peer
   LIBRARY DESTINATION ${CMAKE_INSTALL_PREFIX}/lib/
   PUBLIC_HEADER DESTINATION ${CMAKE_INSTALL_PREFIX}/include/
 )
-

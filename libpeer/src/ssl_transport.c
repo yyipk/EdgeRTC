@@ -34,7 +34,8 @@ static int ssl_transport_mbedtls_recv_timeout(void* ctx, unsigned char* buf, siz
   if (ret < 0) {
     return -1;
   } else if (ret == 0) {
-    return MBEDTLS_ERR_SSL_TIMEOUT;
+    return net_ctx->nonblocking ? MBEDTLS_ERR_SSL_WANT_READ
+                                : MBEDTLS_ERR_SSL_TIMEOUT;
   } else {
     if (FD_ISSET(net_ctx->tcp_socket.fd, &read_fds)) {
       ret = tcp_socket_recv(&net_ctx->tcp_socket, buf, len);

@@ -1,6 +1,26 @@
 cmake_minimum_required(VERSION 3.16)
 cmake_policy(VERSION 3.16)
 
+if(CONFIG_LIBPEER_USE_EXTERNAL_TRANSPORT)
+  set(PEER_SIGNALING_BACKEND_SOURCES
+    ${CMAKE_CURRENT_LIST_DIR}/src/peer_http_external.c
+    ${CMAKE_CURRENT_LIST_DIR}/src/peer_mqtt_external.c
+  )
+  set(PEER_SIGNALING_PROTOCOL_SOURCES)
+else()
+  include(${CMAKE_CURRENT_LIST_DIR}/../coreHTTP/httpFilePaths.cmake)
+  include(${CMAKE_CURRENT_LIST_DIR}/../coreMQTT/mqttFilePaths.cmake)
+  set(PEER_SIGNALING_BACKEND_SOURCES
+    ${CMAKE_CURRENT_LIST_DIR}/src/peer_http_core.c
+    ${CMAKE_CURRENT_LIST_DIR}/src/peer_mqtt_core.c
+  )
+  set(PEER_SIGNALING_PROTOCOL_SOURCES
+    ${HTTP_SOURCES}
+    ${MQTT_SOURCES}
+    ${MQTT_SERIALIZER_SOURCES}
+  )
+endif()
+
 if(COMMAND sdk_generate_library)
   sdk_generate_library()
 
@@ -23,20 +43,15 @@ if(COMMAND sdk_generate_library)
     src/ssl_transport.c
     src/stun.c
     src/utils.c
-    ../coreHTTP/source/core_http_client.c
-    ../coreHTTP/source/dependency/3rdparty/llhttp/src/api.c
-    ../coreHTTP/source/dependency/3rdparty/llhttp/src/llhttp.c
-    ../coreHTTP/source/dependency/3rdparty/llhttp/src/http.c
-    ../coreMQTT/source/core_mqtt.c
-    ../coreMQTT/source/core_mqtt_state.c
-    ../coreMQTT/source/core_mqtt_serializer.c
+    ${PEER_SIGNALING_BACKEND_SOURCES}
+    ${PEER_SIGNALING_PROTOCOL_SOURCES}
   )
 
   sdk_add_include_directories(src)
-  sdk_add_include_directories(../coreHTTP/source/include)
-  sdk_add_include_directories(../coreHTTP/source/interface)
-  sdk_add_include_directories(../coreHTTP/source/dependency/3rdparty/llhttp/include)
-  sdk_add_include_directories(../coreMQTT/source/include)
+  if(NOT CONFIG_LIBPEER_USE_EXTERNAL_TRANSPORT)
+    sdk_add_include_directories(${HTTP_INCLUDE_PUBLIC_DIRS})
+    sdk_add_include_directories(${MQTT_INCLUDE_PUBLIC_DIRS})
+  endif()
 
   set_source_files_properties(
     src/base64.c
@@ -51,23 +66,28 @@ if(COMMAND sdk_generate_library)
   sdk_add_compile_definitions(-DCONFIG_MBEDTLS_2_X=1)
   sdk_add_compile_definitions(-DCONFIG_AUDIO_BUFFER_SIZE=8096)
   sdk_add_compile_definitions(-DCONFIG_DATA_BUFFER_SIZE=80960)
-  sdk_add_compile_definitions(-DHTTP_DO_NOT_USE_CUSTOM_CONFIG=1)
-  sdk_add_compile_definitions(-DMQTT_DO_NOT_USE_CUSTOM_CONFIG=1)
+  if(CONFIG_LIBPEER_USE_EXTERNAL_TRANSPORT)
+    sdk_add_compile_definitions(-DMQTT_USE_MBEDTLS=1)
+  else()
+    sdk_add_compile_definitions(-DHTTP_DO_NOT_USE_CUSTOM_CONFIG=1)
+    sdk_add_compile_definitions(-DMQTT_DO_NOT_USE_CUSTOM_CONFIG=1)
+  endif()
   return()
 endif()
 
-include(${CMAKE_CURRENT_LIST_DIR}/../coreHTTP/httpFilePaths.cmake)
-include(${CMAKE_CURRENT_LIST_DIR}/../coreMQTT/mqttFilePaths.cmake)
-
 if (DEFINED ENV{IDF_PATH})
   file(GLOB ESP32_CODES "./src/*.c")
+  list(FILTER ESP32_CODES EXCLUDE REGEX "/peer_(http|mqtt)_(core|external)\\.c$")
   idf_component_register(
-   SRCS ${ESP32_CODES} ${HTTP_SOURCES} ${MQTT_SOURCES} ${MQTT_SERIALIZER_SOURCES}
+   SRCS ${ESP32_CODES} ${PEER_SIGNALING_BACKEND_SOURCES} ${PEER_SIGNALING_PROTOCOL_SOURCES}
    INCLUDE_DIRS "./include" ${HTTP_INCLUDE_PUBLIC_DIRS} ${MQTT_INCLUDE_PUBLIC_DIRS}
    PRIV_INCLUDE_DIRS "./src"
    REQUIRES mbedtls srtp json esp_netif
   )
-  add_definitions("-DCONFIG_USE_LWIP=1" "-DCONFIG_USE_USRSCTP=0" "-DCONFIG_AUDIO_BUFFER_SIZE=8096" "-DCONFIG_DATA_BUFFER_SIZE=102400" "-D__BYTE_ORDER=__LITTLE_ENDIAN" "-DHTTP_DO_NOT_USE_CUSTOM_CONFIG" "-DMQTT_DO_NOT_USE_CUSTOM_CONFIG")
+  add_definitions("-DCONFIG_USE_LWIP=1" "-DCONFIG_USE_USRSCTP=0" "-DCONFIG_AUDIO_BUFFER_SIZE=8096" "-DCONFIG_DATA_BUFFER_SIZE=102400" "-D__BYTE_ORDER=__LITTLE_ENDIAN")
+  if(NOT CONFIG_LIBPEER_USE_EXTERNAL_TRANSPORT)
+    add_definitions("-DHTTP_DO_NOT_USE_CUSTOM_CONFIG" "-DMQTT_DO_NOT_USE_CUSTOM_CONFIG")
+  endif()
   return()
 endif()
 

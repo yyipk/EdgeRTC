@@ -9,7 +9,7 @@
 #include <stdint.h>
 
 #include "socket.h"
-#include "transport_interface.h"
+typedef struct NetworkContext NetworkContext_t;
 
 struct NetworkContext {
   TcpSocket tcp_socket;

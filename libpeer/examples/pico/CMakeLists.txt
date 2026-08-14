@@ -10,8 +10,25 @@ pico_sdk_init()
 include(FreeRTOS_Kernel_import.cmake)
 
 
-include(${CMAKE_CURRENT_LIST_DIR}/../../third_party/coreHTTP/httpFilePaths.cmake)
-include(${CMAKE_CURRENT_LIST_DIR}/../../third_party/coreMQTT/mqttFilePaths.cmake)
+if(CONFIG_LIBPEER_USE_EXTERNAL_TRANSPORT)
+  set(PEER_SIGNALING_BACKEND_SOURCES
+    ../../src/peer_http_external.c
+    ../../src/peer_mqtt_external.c
+  )
+  set(PEER_SIGNALING_PROTOCOL_SOURCES)
+else()
+  include(${CMAKE_CURRENT_LIST_DIR}/../../third_party/coreHTTP/httpFilePaths.cmake)
+  include(${CMAKE_CURRENT_LIST_DIR}/../../third_party/coreMQTT/mqttFilePaths.cmake)
+  set(PEER_SIGNALING_BACKEND_SOURCES
+    ../../src/peer_http_core.c
+    ../../src/peer_mqtt_core.c
+  )
+  set(PEER_SIGNALING_PROTOCOL_SOURCES
+    ${HTTP_SOURCES}
+    ${MQTT_SOURCES}
+    ${MQTT_SERIALIZER_SOURCES}
+  )
+endif()
 include_directories(
   ${CMAKE_CURRENT_LIST_DIR}/
   ${CMAKE_BINARY_DIR}/
@@ -82,11 +99,11 @@ add_library(cjson STATIC
 
 # Build peer
 file(GLOB LIBPEER_SRC "../../src/*.c")
+list(FILTER LIBPEER_SRC EXCLUDE REGEX "/peer_(http|mqtt)_(core|external)\\.c$")
 add_library(peer STATIC
   ${LIBPEER_SRC}
-  ${HTTP_SOURCES}
-  ${MQTT_SOURCES}
-  ${MQTT_SERIALIZER_SOURCES}
+  ${PEER_SIGNALING_BACKEND_SOURCES}
+  ${PEER_SIGNALING_PROTOCOL_SOURCES}
 )
 
 target_compile_definitions(peer PRIVATE

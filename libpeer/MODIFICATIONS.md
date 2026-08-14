@@ -11,6 +11,7 @@
 | Commit subject | Purpose |
 | --- | --- |
 | `build: integrate libpeer with embedded SDK` | Add the SDK build entry and use the LiteRTC root dependency submodules. |
+| `build(sdk): use platform signaling dependencies` | Select external HTTP and MQTT through libpeer transport abstractions without platform conditionals in signaling code. `CONFIG_LIBPEER_USE_EXTERNAL_TRANSPORT` selects external or bundled core backends; libpeer has no RTSP call path, so the SDK RTSP server is not linked. |
 | `fix(ice): compare candidate addresses correctly` | Compare address family, port, and IP instead of treating every address as equal. |
 | `fix(port): adapt signaling waits for FreeRTOS` | Avoid conflicting signal headers and shorten blocking mDNS resolution. |
 | `fix(tls): make transport lifecycle robust` | Support nonblocking MQTT reads and release partial connections on failure. |
@@ -32,4 +33,6 @@
 ## Verification
 
 The RTP payload test covers variable headers, metadata, decoder isolation,
-size limits, STAP-A, invalid FU-A sequences, and decoder buffer reuse.
+size limits, STAP-A, invalid FU-A sequences, and decoder buffer reuse. The SDK
+`webrtc_solution` build verifies that external signaling resolves
+through the SDK HTTP, MQTT, mbedTLS, and cJSON libraries.
