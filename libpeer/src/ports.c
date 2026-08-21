@@ -2,6 +2,7 @@
 #include <string.h>
 #include <sys/time.h>
 #include <sys/types.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "config.h"
@@ -163,6 +164,17 @@ uint32_t ports_get_epoch_time() {
   struct timeval tv;
   gettimeofday(&tv, NULL);
   return (uint32_t)tv.tv_sec * 1000 + tv.tv_usec / 1000;
+}
+
+uint32_t ports_get_time_ms() {
+#if CONFIG_USE_LWIP
+  return sys_now();
+#else
+  struct timespec ts;
+
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return (uint32_t)ts.tv_sec * 1000U + (uint32_t)ts.tv_nsec / 1000000U;
+#endif
 }
 
 void ports_sleep_ms(int ms) {

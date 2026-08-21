@@ -14,6 +14,8 @@ int ports_get_mac_addr(uint8_t mac[6]);
 
 uint32_t ports_get_epoch_time();
 
+uint32_t ports_get_time_ms();
+
 void ports_sleep_ms(int ms);
 
 #endif  // PORTS_H_
