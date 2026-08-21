@@ -701,6 +701,6 @@ void dtls_srtp_encrypt_rtp_packet(DtlsSrtp* dtls_srtp, uint8_t* packet, int* byt
   srtp_protect(dtls_srtp->srtp_out, packet, bytes);
 }
 
-void dtls_srtp_encrypt_rctp_packet(DtlsSrtp* dtls_srtp, uint8_t* packet, int* bytes) {
-  srtp_protect_rtcp(dtls_srtp->srtp_out, packet, bytes);
+int dtls_srtp_encrypt_rctp_packet(DtlsSrtp* dtls_srtp, uint8_t* packet, int* bytes) {
+  return srtp_protect_rtcp(dtls_srtp->srtp_out, packet, bytes);
 }
