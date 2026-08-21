@@ -89,5 +89,39 @@ int main(void)
            EDGE_AUDIO_JITTER_CONCEALED);
     assert(!is_silence(output));
 
+    /* Recover when a packet burst leaves the RTP sequence behind playout. */
+    edge_audio_jitter_reset(&jitter);
+    fill(input, 0xaa);
+    assert(edge_audio_jitter_push(&jitter, input, sizeof(input), 400, 4) == 1);
+    assert(edge_audio_jitter_push(&jitter, input, sizeof(input), 401, 4) == 1);
+    assert(edge_audio_jitter_push(&jitter, input, sizeof(input), 402, 4) == 1);
+    assert(edge_audio_jitter_push(&jitter, input, sizeof(input), 403, 4) == 1);
+    assert(edge_audio_jitter_push(&jitter, input, sizeof(input), 404, 4) == 1);
+    assert(edge_audio_jitter_push(&jitter, input, sizeof(input), 405, 4) == 1);
+    assert(edge_audio_jitter_get(&jitter, output, sizeof(output)) ==
+           EDGE_AUDIO_JITTER_FRAME);
+    assert(edge_audio_jitter_get(&jitter, output, sizeof(output)) ==
+           EDGE_AUDIO_JITTER_FRAME);
+    assert(edge_audio_jitter_get(&jitter, output, sizeof(output)) ==
+           EDGE_AUDIO_JITTER_FRAME);
+    assert(edge_audio_jitter_get(&jitter, output, sizeof(output)) ==
+           EDGE_AUDIO_JITTER_FRAME);
+    assert(edge_audio_jitter_get(&jitter, output, sizeof(output)) ==
+           EDGE_AUDIO_JITTER_FRAME);
+    assert(edge_audio_jitter_get(&jitter, output, sizeof(output)) ==
+           EDGE_AUDIO_JITTER_FRAME);
+    for (int index = 0; index < EDGE_AUDIO_JITTER_SLOT_COUNT; index++) {
+        assert(edge_audio_jitter_get(&jitter, output, sizeof(output)) ==
+               EDGE_AUDIO_JITTER_CONCEALED);
+    }
+    assert(edge_audio_jitter_push(&jitter, input, sizeof(input), 406, 4) == 1);
+    assert(edge_audio_jitter_push(&jitter, input, sizeof(input), 407, 4) == 1);
+    assert(edge_audio_jitter_push(&jitter, input, sizeof(input), 408, 4) == 1);
+    assert(edge_audio_jitter_push(&jitter, input, sizeof(input), 409, 4) == 1);
+    assert(edge_audio_jitter_push(&jitter, input, sizeof(input), 410, 4) == 1);
+    assert(edge_audio_jitter_push(&jitter, input, sizeof(input), 411, 4) == 1);
+    assert(edge_audio_jitter_get(&jitter, output, sizeof(output)) ==
+           EDGE_AUDIO_JITTER_FRAME);
+
     return 0;
 }
