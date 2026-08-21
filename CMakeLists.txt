@@ -14,9 +14,10 @@ endif()
 
 sdk_add_subdirectory_ifdef(CONFIG_LIBPEER libpeer)
 sdk_add_subdirectory_ifdef(CONFIG_LIBPEER alg/jitter_buffer)
+sdk_add_subdirectory_ifdef(CONFIG_ALIGENIE_AEC alg/audio/aligenieSDK_alg)
 sdk_add_subdirectory_ifdef(CONFIG_AEC4 alg/audio/aec4)
 
-foreach(target liblibpeer libedgertc_jitter_buffer libaec4)
+foreach(target liblibpeer libedgertc_jitter_buffer libaligenie_aec libaec4)
     if(TARGET ${target})
         target_link_libraries(${target} PRIVATE edgertc_compile_options)
     endif()
