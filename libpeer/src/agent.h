@@ -41,6 +41,25 @@ typedef enum AgentMode {
 
 typedef struct Agent Agent;
 
+typedef struct TurnState {
+  Address server;
+  Address peer;
+  const char* username;
+  const char* credential;
+  char realm[128];
+  char nonce[256];
+  uint32_t lifetime;
+  uint32_t last_refresh_ms;
+  uint32_t last_permission_ms;
+  uint32_t last_channel_bind_ms;
+  uint32_t request_sent_ms;
+  uint32_t request_transaction_id[3];
+  StunMethod request_method;
+  uint8_t allocated;
+  uint8_t permission_active;
+  uint8_t channel_bound;
+} TurnState;
+
 struct Agent {
   char remote_ufrag[ICE_UFRAG_LENGTH + 1];
   char remote_upwd[ICE_UPWD_LENGTH + 1];
@@ -75,6 +94,9 @@ struct Agent {
   uint32_t conncheck_last_send_ms;
   uint32_t transaction_id[3];
   uint32_t conncheck_transaction_id[3];
+  TurnState turn;
+  StunMessage recv_msg;
+  StunMessage send_msg;
 };
 
 void agent_gather_candidate(Agent* agent, const char* urls, const char* username, const char* credential);
