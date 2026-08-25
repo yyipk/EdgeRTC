@@ -13,7 +13,7 @@ typedef struct StunAttribute StunAttribute;
 
 typedef struct StunMessage StunMessage;
 
-#define STUN_ATTR_BUF_SIZE 256
+#define STUN_ATTR_BUF_SIZE (CONFIG_MTU + 256)
 #define MAGIC_COOKIE 0x2112A442
 #define STUN_FINGERPRINT_XOR 0x5354554e
 
@@ -30,6 +30,11 @@ typedef enum StunMethod {
 
   STUN_METHOD_BINDING = 0x0001,
   STUN_METHOD_ALLOCATE = 0x0003,
+  STUN_METHOD_REFRESH = 0x0004,
+  STUN_METHOD_SEND = 0x0006,
+  STUN_METHOD_DATA = 0x0007,
+  STUN_METHOD_CREATE_PERMISSION = 0x0008,
+  STUN_METHOD_CHANNEL_BIND = 0x0009,
 
 } StunMethod;
 
@@ -39,7 +44,10 @@ typedef enum StunAttrType {
   STUN_ATTR_TYPE_USERNAME = 0x0006,
   STUN_ATTR_TYPE_MESSAGE_INTEGRITY = 0x0008,
   STUN_ATTR_TYPE_ERROR_CODE = 0x0009,
+  STUN_ATTR_TYPE_CHANNEL_NUMBER = 0x000c,
   STUN_ATTR_TYPE_LIFETIME = 0x000d,
+  STUN_ATTR_TYPE_XOR_PEER_ADDRESS = 0x0012,
+  STUN_ATTR_TYPE_DATA = 0x0013,
   STUN_ATTR_TYPE_REALM = 0x0014,
   STUN_ATTR_TYPE_NONCE = 0x0015,
   STUN_ATTR_TYPE_XOR_RELAYED_ADDRESS = 0x0016,
@@ -50,6 +58,7 @@ typedef enum StunAttrType {
   STUN_ATTR_TYPE_FINGERPRINT = 0x8028,
   STUN_ATTR_TYPE_ICE_CONTROLLED = 0x8029,
   STUN_ATTR_TYPE_ICE_CONTROLLING = 0x802a,
+  STUN_ATTR_TYPE_RESPONSE_ORIGIN = 0x802b,
   STUN_ATTR_TYPE_SOFTWARE = 0x8022,
   // https://datatracker.ietf.org/doc/html/draft-thatcher-ice-network-cost-00
   STUN_ATTR_TYPE_NETWORK_COST = 0xc057,
@@ -92,12 +101,19 @@ struct StunMessage {
   int ice_controlled;
   int ice_controlling;
   uint32_t fingerprint;
+  uint32_t lifetime;
+  uint16_t channel_number;
   char message_integrity[20];
-  char username[128];
-  char realm[64];
-  char nonce[64];
+  size_t message_integrity_offset;
+  size_t fingerprint_offset;
+  char username[584];
+  char realm[128];
+  char nonce[256];
   Address mapped_addr;
   Address relayed_addr;
+  Address peer_addr;
+  uint8_t* data;
+  size_t data_size;
   uint8_t buf[STUN_ATTR_BUF_SIZE];
   size_t size;
 };
@@ -110,15 +126,22 @@ void stun_get_mapped_address(char* value, uint8_t* mask, Address* addr);
 
 void stun_msg_parse(StunMessage* msg, uint8_t* buf, size_t len);
 
-void stun_parse_msg_buf(StunMessage* msg);
+int stun_parse_msg_buf(StunMessage* msg);
 
 void stun_calculate_fingerprint(char* buf, size_t len, uint32_t* fingerprint);
 
 int stun_msg_write_attr(StunMessage* msg, StunAttrType type, uint16_t length, char* value);
 
+int stun_msg_write_xor_address(StunMessage* msg, StunAttrType type,
+                               Address* addr);
+
 int stun_probe(uint8_t* buf, size_t size);
 
-int stun_msg_is_valid(uint8_t* buf, size_t len, char* password);
+int stun_msg_is_valid(uint8_t* buf, size_t len, const char* password);
+
+int stun_msg_is_valid_long_term(uint8_t* buf, size_t len,
+                                const char* username, const char* realm,
+                                const char* password);
 
 int stun_msg_finish(StunMessage* msg, StunCredential credential, const char* password, size_t password_len);
 

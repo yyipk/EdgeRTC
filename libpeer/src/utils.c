@@ -44,3 +44,20 @@ void utils_get_md5(const char* input, size_t input_len, unsigned char* output) {
   mbedtls_md_finish(&ctx, output);
   mbedtls_md_free(&ctx);
 }
+
+void utils_get_md5_credential(const char* username, const char* realm,
+                              const char* password, unsigned char* output) {
+  mbedtls_md_context_t ctx;
+  mbedtls_md_type_t md_type = MBEDTLS_MD_MD5;
+
+  mbedtls_md_init(&ctx);
+  mbedtls_md_setup(&ctx, mbedtls_md_info_from_type(md_type), 1);
+  mbedtls_md_starts(&ctx);
+  mbedtls_md_update(&ctx, (const unsigned char*)username, strlen(username));
+  mbedtls_md_update(&ctx, (const unsigned char*)":", 1);
+  mbedtls_md_update(&ctx, (const unsigned char*)realm, strlen(realm));
+  mbedtls_md_update(&ctx, (const unsigned char*)":", 1);
+  mbedtls_md_update(&ctx, (const unsigned char*)password, strlen(password));
+  mbedtls_md_finish(&ctx, output);
+  mbedtls_md_free(&ctx);
+}

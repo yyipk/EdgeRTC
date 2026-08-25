@@ -56,6 +56,7 @@ uint32_t CRC32_TABLE[256] = {
     0xb40bbe37, 0xc30c8ea1, 0x5a05df1b, 0x2d02ef8d};
 
 void stun_msg_create(StunMessage* msg, uint16_t type) {
+  memset(msg, 0, sizeof(*msg));
   StunHeader* header = (StunHeader*)msg->buf;
   header->type = htons(type);
   header->length = 0;
@@ -132,22 +133,62 @@ void stun_get_mapped_address(char* value, uint8_t* mask, Address* addr) {
   LOGD("XOR Mapped Address IP: %s (IP XOR: %08" PRIu32 ")", addr_string, *addr32);
 }
 
-void stun_parse_msg_buf(StunMessage* msg) {
+static uint16_t stun_get_method(uint16_t type) {
+  return (type & 0x000f) | ((type & 0x00e0) >> 1) |
+         ((type & 0x3e00) >> 2);
+}
+
+static int stun_mapped_address_is_valid(const char* value, size_t length) {
+  if (length < 2) {
+    return 0;
+  }
+  switch ((uint8_t)value[1]) {
+    case STUN_FAMILY_IPV4:
+      return length >= 8;
+    case STUN_FAMILY_IPV6:
+      return length >= 20;
+    default:
+      return 0;
+  }
+}
+
+int stun_parse_msg_buf(StunMessage* msg) {
   StunHeader* header = (StunHeader*)msg->buf;
-
-  int length = ntohs(header->length) + sizeof(StunHeader);
-
-  int pos = sizeof(StunHeader);
-
+  size_t length;
+  size_t pos = sizeof(StunHeader);
   uint8_t mask[16];
+  uint16_t type;
+
+  if (msg->size < sizeof(StunHeader)) {
+    return -1;
+  }
+  length = ntohs(header->length) + sizeof(StunHeader);
+  if (length != msg->size || length > sizeof(msg->buf)) {
+    return -1;
+  }
 
   msg->error_code = 0;
   msg->priority = 0;
   msg->use_candidate = 0;
   msg->ice_controlled = 0;
   msg->ice_controlling = 0;
+  msg->fingerprint = 0;
+  msg->lifetime = 0;
+  msg->channel_number = 0;
+  memset(msg->message_integrity, 0, sizeof(msg->message_integrity));
+  msg->message_integrity_offset = 0;
+  msg->fingerprint_offset = 0;
+  memset(msg->username, 0, sizeof(msg->username));
+  memset(msg->realm, 0, sizeof(msg->realm));
+  memset(msg->nonce, 0, sizeof(msg->nonce));
+  memset(&msg->mapped_addr, 0, sizeof(msg->mapped_addr));
+  memset(&msg->relayed_addr, 0, sizeof(msg->relayed_addr));
+  memset(&msg->peer_addr, 0, sizeof(msg->peer_addr));
+  msg->data = NULL;
+  msg->data_size = 0;
 
-  msg->stunclass = ntohs(header->type);
+  type = ntohs(header->type);
+  msg->stunclass = type;
   if ((msg->stunclass & STUN_CLASS_ERROR) == STUN_CLASS_ERROR) {
     msg->stunclass = STUN_CLASS_ERROR;
   } else if ((msg->stunclass & STUN_CLASS_INDICATION) == STUN_CLASS_INDICATION) {
@@ -158,30 +199,42 @@ void stun_parse_msg_buf(StunMessage* msg) {
     msg->stunclass = STUN_CLASS_REQUEST;
   }
 
-  msg->stunmethod = ntohs(header->type) & 0x0FFF;
-  if ((msg->stunmethod & STUN_METHOD_ALLOCATE) == STUN_METHOD_ALLOCATE) {
-    msg->stunmethod = STUN_METHOD_ALLOCATE;
-  } else if ((msg->stunmethod & STUN_METHOD_BINDING) == STUN_METHOD_BINDING) {
-    msg->stunmethod = STUN_METHOD_BINDING;
-  }
+  msg->stunmethod = stun_get_method(type);
 
-  while (pos < length) {
+  while (pos + sizeof(StunAttribute) <= length) {
     StunAttribute* attr = (StunAttribute*)(msg->buf + pos);
+    size_t attr_length = ntohs(attr->length);
+    size_t padded_length = ALIGN32(attr_length);
+
+    if (pos + sizeof(StunAttribute) + padded_length > length) {
+      return -1;
+    }
     memset(mask, 0, sizeof(mask));
     // LOGD("Attribute Type: 0x%04x", ntohs(attr->type));
     // LOGD("Attribute Length: %d", ntohs(attr->length));
 
     switch (ntohs(attr->type)) {
       case STUN_ATTR_TYPE_MAPPED_ADDRESS:
+        if (!stun_mapped_address_is_valid(attr->value, attr_length)) {
+          return -1;
+        }
         stun_get_mapped_address(attr->value, mask, &msg->mapped_addr);
         break;
       case STUN_ATTR_TYPE_USERNAME:
         memset(msg->username, 0, sizeof(msg->username));
-        memcpy(msg->username, attr->value, ntohs(attr->length));
+        memcpy(msg->username, attr->value,
+               attr_length < sizeof(msg->username) - 1
+                   ? attr_length
+                   : sizeof(msg->username) - 1);
         // LOGD("length = %d, Username %s", ntohs(attr->length), msg->username);
         break;
       case STUN_ATTR_TYPE_MESSAGE_INTEGRITY:
-        memcpy(msg->message_integrity, attr->value, ntohs(attr->length));
+        if (attr_length != sizeof(msg->message_integrity)) {
+          return -1;
+        }
+        memcpy(msg->message_integrity, attr->value,
+               sizeof(msg->message_integrity));
+        msg->message_integrity_offset = pos;
 
         char message_integrity_hex[41];
 
@@ -196,27 +249,66 @@ void stun_parse_msg_buf(StunMessage* msg) {
         }
         break;
       case STUN_ATTR_TYPE_LIFETIME:
+        if (attr_length == sizeof(uint32_t)) {
+          uint32_t lifetime;
+          memcpy(&lifetime, attr->value, sizeof(lifetime));
+          msg->lifetime = ntohl(lifetime);
+        }
+        break;
+      case STUN_ATTR_TYPE_CHANNEL_NUMBER:
+        if (attr_length == sizeof(uint32_t)) {
+          uint16_t channel_number;
+          memcpy(&channel_number, attr->value, sizeof(channel_number));
+          msg->channel_number = ntohs(channel_number);
+        }
+        break;
+      case STUN_ATTR_TYPE_REQUESTED_TRANSPORT:
         break;
       case STUN_ATTR_TYPE_REALM:
         memset(msg->realm, 0, sizeof(msg->realm));
-        memcpy(msg->realm, attr->value, ntohs(attr->length));
+        memcpy(msg->realm, attr->value,
+               attr_length < sizeof(msg->realm) - 1
+                   ? attr_length
+                   : sizeof(msg->realm) - 1);
         LOGD("Realm %s", msg->realm);
         break;
       case STUN_ATTR_TYPE_NONCE:
         memset(msg->nonce, 0, sizeof(msg->nonce));
-        memcpy(msg->nonce, attr->value, ntohs(attr->length));
+        memcpy(msg->nonce, attr->value,
+               attr_length < sizeof(msg->nonce) - 1
+                   ? attr_length
+                   : sizeof(msg->nonce) - 1);
         LOGD("Nonce %s", msg->nonce);
         break;
       case STUN_ATTR_TYPE_XOR_RELAYED_ADDRESS:
+        if (!stun_mapped_address_is_valid(attr->value, attr_length)) {
+          return -1;
+        }
         *((uint32_t*)mask) = htonl(MAGIC_COOKIE);
         memcpy(mask + 4, header->transaction_id, sizeof(header->transaction_id));
         LOGD("XOR Relayed Address");
         stun_get_mapped_address(attr->value, mask, &msg->relayed_addr);
         break;
       case STUN_ATTR_TYPE_XOR_MAPPED_ADDRESS:
+        if (!stun_mapped_address_is_valid(attr->value, attr_length)) {
+          return -1;
+        }
         *((uint32_t*)mask) = htonl(MAGIC_COOKIE);
         memcpy(mask + 4, header->transaction_id, sizeof(header->transaction_id));
         stun_get_mapped_address(attr->value, mask, &msg->mapped_addr);
+        break;
+      case STUN_ATTR_TYPE_XOR_PEER_ADDRESS:
+        if (!stun_mapped_address_is_valid(attr->value, attr_length)) {
+          return -1;
+        }
+        *((uint32_t*)mask) = htonl(MAGIC_COOKIE);
+        memcpy(mask + 4, header->transaction_id,
+               sizeof(header->transaction_id));
+        stun_get_mapped_address(attr->value, mask, &msg->peer_addr);
+        break;
+      case STUN_ATTR_TYPE_DATA:
+        msg->data = (uint8_t*)attr->value;
+        msg->data_size = attr_length;
         break;
       case STUN_ATTR_TYPE_PRIORITY: {
         uint32_t priority;
@@ -229,7 +321,11 @@ void stun_parse_msg_buf(StunMessage* msg) {
         msg->use_candidate = 1;
         break;
       case STUN_ATTR_TYPE_FINGERPRINT:
-        memcpy(&msg->fingerprint, attr->value, ntohs(attr->length));
+        if (attr_length != sizeof(msg->fingerprint)) {
+          return -1;
+        }
+        memcpy(&msg->fingerprint, attr->value, sizeof(msg->fingerprint));
+        msg->fingerprint_offset = pos;
         // LOGD("Fingerprint: 0x%.4x", msg->fingerprint);
         break;
       case STUN_ATTR_TYPE_ICE_CONTROLLED:
@@ -239,6 +335,8 @@ void stun_parse_msg_buf(StunMessage* msg) {
         msg->ice_controlling = 1;
         break;
       case STUN_ATTR_TYPE_NETWORK_COST:
+      case STUN_ATTR_TYPE_SOFTWARE:
+      case STUN_ATTR_TYPE_RESPONSE_ORIGIN:
         // Do nothing
         break;
       default:
@@ -246,8 +344,9 @@ void stun_parse_msg_buf(StunMessage* msg) {
         break;
     }
 
-    pos += 4 * ((ntohs(attr->length) + 3) / 4) + sizeof(StunAttribute);
+    pos += sizeof(StunAttribute) + padded_length;
   }
+  return pos == length ? 0 : -1;
 }
 
 void stun_calculate_fingerprint(char* buf, size_t len, uint32_t* fingerprint) {
@@ -263,28 +362,37 @@ void stun_calculate_fingerprint(char* buf, size_t len, uint32_t* fingerprint) {
 
 int stun_msg_write_attr(StunMessage* msg, StunAttrType type, uint16_t length, char* value) {
   StunHeader* header = (StunHeader*)msg->buf;
-
+  uint16_t value_length = length;
+  size_t padded_length = ALIGN32(length);
   StunAttribute* stun_attr = (StunAttribute*)(msg->buf + msg->size);
 
+  if (msg->size + sizeof(StunAttribute) + padded_length > sizeof(msg->buf)) {
+    return -1;
+  }
   stun_attr->type = htons(type);
   stun_attr->length = htons(length);
-  if (value)
+  if (value) {
     memcpy(stun_attr->value, value, length);
+  }
+  if (padded_length > length) {
+    memset(stun_attr->value + length, 0, padded_length - length);
+  }
 
-  length = 4 * ((length + 3) / 4);
-  header->length = htons(ntohs(header->length) + sizeof(StunAttribute) + length);
+  header->length = htons(ntohs(header->length) + sizeof(StunAttribute) +
+                         padded_length);
 
-  msg->size += length + sizeof(StunAttribute);
+  msg->size += padded_length + sizeof(StunAttribute);
 
   switch (type) {
     case STUN_ATTR_TYPE_REALM:
-      memcpy(msg->realm, value, length);
+      snprintf(msg->realm, sizeof(msg->realm), "%.*s", value_length, value);
       break;
     case STUN_ATTR_TYPE_NONCE:
-      memcpy(msg->nonce, value, length);
+      snprintf(msg->nonce, sizeof(msg->nonce), "%.*s", value_length, value);
       break;
     case STUN_ATTR_TYPE_USERNAME:
-      memcpy(msg->username, value, length);
+      snprintf(msg->username, sizeof(msg->username), "%.*s", value_length,
+               value);
       break;
     default:
       break;
@@ -293,28 +401,40 @@ int stun_msg_write_attr(StunMessage* msg, StunAttrType type, uint16_t length, ch
   return 0;
 }
 
+int stun_msg_write_xor_address(StunMessage* msg, StunAttrType type,
+                               Address* addr) {
+  StunHeader* header = (StunHeader*)msg->buf;
+  char value[20] = {0};
+  uint8_t mask[16] = {0};
+  int length;
+
+  *((uint32_t*)mask) = htonl(MAGIC_COOKIE);
+  memcpy(mask + 4, header->transaction_id, sizeof(header->transaction_id));
+  length = stun_set_mapped_address(value, mask, addr);
+  return stun_msg_write_attr(msg, type, length, value);
+}
+
 int stun_msg_finish(StunMessage* msg, StunCredential credential, const char* password, size_t password_len) {
   StunHeader* header = (StunHeader*)msg->buf;
   StunAttribute* stun_attr;
 
   uint16_t header_length = ntohs(header->length);
-  char key[256];
-  char hash_key[17];
-  memset(key, 0, sizeof(key));
-  memset(hash_key, 0, sizeof(hash_key));
+  unsigned char hash_key[16];
 
   switch (credential) {
     case STUN_CREDENTIAL_LONG_TERM:
-      snprintf(key, sizeof(key), "%s:%s:%s", msg->username, msg->realm, password);
-      LOGD("key: %s", key);
-      utils_get_md5(key, strlen(key), (unsigned char*)hash_key);
-      password = hash_key;
+      utils_get_md5_credential(msg->username, msg->realm, password,
+                               hash_key);
+      password = (const char*)hash_key;
       password_len = 16;
       break;
     default:
       break;
   }
 
+  if (msg->size + 32 > sizeof(msg->buf)) {
+    return -1;
+  }
   stun_attr = (StunAttribute*)(msg->buf + msg->size);
   header->length = htons(header_length + 24); /* HMAC-SHA1 */
   stun_attr->type = htons(STUN_ATTR_TYPE_MESSAGE_INTEGRITY);
@@ -380,46 +500,93 @@ StunMsgType stun_is_stun_msg(uint8_t *buf, size_t size) {
   return 0;
 }
 #endif
-int stun_msg_is_valid(uint8_t* buf, size_t size, char* password) {
-  StunMessage msg;
-
-  memcpy(msg.buf, buf, size);
-
-  stun_parse_msg_buf(&msg);
-
-  StunHeader* header = (StunHeader*)msg.buf;
-
-  // FINGERPRINT
-  uint32_t fingerprint = 0;
-  size_t length = size - 4 - sizeof(StunAttribute);
-  stun_calculate_fingerprint((char*)msg.buf, length, &fingerprint);
-  // LOGD("Fingerprint: 0x%08x", fingerprint);
-
-  if (fingerprint != msg.fingerprint) {
-    // LOGE("Fingerprint does not match.");
-    return -1;
-  } else {
-    // LOGD("Fingerprint matches.");
-  }
-
-  // MESSAGE-INTEGRITY
-  unsigned char message_integrity_hex[41];
+static int stun_msg_is_valid_key(uint8_t* buf, size_t size,
+                                 const char* key, size_t key_len) {
+  StunHeader* header = (StunHeader*)buf;
+  StunAttribute* attr;
   unsigned char message_integrity[20];
-  header->length = htons(ntohs(header->length) - 4 - sizeof(StunAttribute));
-  length = length - 20 - sizeof(StunAttribute);
-  utils_get_hmac_sha1((char*)msg.buf, length, password, strlen(password), message_integrity);
-  for (int i = 0; i < 20; i++) {
-    sprintf((char*)&message_integrity_hex[2 * i], "%02x", (uint8_t)message_integrity[i]);
-  }
+  const unsigned char* expected_integrity = NULL;
+  uint16_t header_length;
+  uint32_t expected_fingerprint = 0;
+  uint32_t fingerprint = 0;
+  size_t attr_length;
+  size_t message_integrity_offset = 0;
+  size_t fingerprint_offset = 0;
+  size_t length;
+  size_t padded_length;
+  size_t pos;
 
-  // LOGD("message_integrity: 0x%s", message_integrity_hex);
-
-  if (memcmp(message_integrity, msg.message_integrity, 20) != 0) {
-    // LOGE("Message Integrity does not match.");
+  if (buf == NULL || key == NULL ||
+      size < sizeof(StunHeader) + sizeof(StunAttribute) + 20 ||
+      size > STUN_ATTR_BUF_SIZE ||
+      header->magic_cookie != htonl(MAGIC_COOKIE)) {
     return -1;
-  } else {
-    // LOGD("Message Integrity matches.");
+  }
+  length = ntohs(header->length) + sizeof(StunHeader);
+  if (length != size) {
+    return -1;
+  }
+  for (pos = sizeof(StunHeader);
+       pos + sizeof(StunAttribute) <= length;
+       pos += sizeof(StunAttribute) + padded_length) {
+    attr = (StunAttribute*)(buf + pos);
+    attr_length = ntohs(attr->length);
+    padded_length = ALIGN32(attr_length);
+    if (pos + sizeof(StunAttribute) + padded_length > length) {
+      return -1;
+    }
+    if (ntohs(attr->type) == STUN_ATTR_TYPE_MESSAGE_INTEGRITY) {
+      if (attr_length != sizeof(message_integrity)) {
+        return -1;
+      }
+      message_integrity_offset = pos;
+      expected_integrity = (const unsigned char*)attr->value;
+    } else if (ntohs(attr->type) == STUN_ATTR_TYPE_FINGERPRINT) {
+      if (attr_length != sizeof(expected_fingerprint)) {
+        return -1;
+      }
+      fingerprint_offset = pos;
+      memcpy(&expected_fingerprint, attr->value,
+             sizeof(expected_fingerprint));
+    }
+  }
+  if (pos != length || message_integrity_offset == 0) {
+    return -1;
+  }
+  if (fingerprint_offset != 0) {
+    stun_calculate_fingerprint((char*)buf, fingerprint_offset,
+                               &fingerprint);
+    if (fingerprint != expected_fingerprint) {
+      return -1;
+    }
   }
 
-  return 0;
+  header_length = header->length;
+  header->length = htons(message_integrity_offset - sizeof(StunHeader) +
+                         sizeof(StunAttribute) + 20);
+  utils_get_hmac_sha1((char*)buf, message_integrity_offset, key, key_len,
+                      message_integrity);
+  header->length = header_length;
+  return memcmp(message_integrity, expected_integrity,
+                sizeof(message_integrity)) == 0 ? 0 : -1;
+}
+
+int stun_msg_is_valid(uint8_t* buf, size_t size, const char* password) {
+  if (password == NULL) {
+    return -1;
+  }
+  return stun_msg_is_valid_key(buf, size, password, strlen(password));
+}
+
+int stun_msg_is_valid_long_term(uint8_t* buf, size_t size,
+                                const char* username, const char* realm,
+                                const char* password) {
+  unsigned char hash_key[16];
+
+  if (username == NULL || realm == NULL || password == NULL) {
+    return -1;
+  }
+  utils_get_md5_credential(username, realm, password, hash_key);
+  return stun_msg_is_valid_key(buf, size, (const char*)hash_key,
+                               sizeof(hash_key));
 }
