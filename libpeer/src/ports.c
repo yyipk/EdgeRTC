@@ -123,6 +123,24 @@ int ports_get_host_addr(Address* addr, const char* iface_prefix) {
   return ret;
 }
 
+int ports_get_default_gateway(Address* addr) {
+#if CONFIG_USE_LWIP
+  if (netif_default == NULL || !netif_is_up(netif_default) ||
+      ip4_addr_isany(netif_ip4_gw(netif_default))) {
+    return 0;
+  }
+
+  memset(addr, 0, sizeof(*addr));
+  addr_set_family(addr, AF_INET);
+  memcpy(&addr->sin.sin_addr, netif_ip4_gw(netif_default),
+         sizeof(addr->sin.sin_addr));
+  return 1;
+#else
+  (void)addr;
+  return 0;
+#endif
+}
+
 int ports_resolve_addr(const char* host, Address* addr) {
   char addr_string[ADDRSTRLEN];
   int ret = -1;

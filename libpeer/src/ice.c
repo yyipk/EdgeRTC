@@ -15,6 +15,8 @@ static uint8_t ice_candidate_type_preference(IceCandidateType type) {
   switch (type) {
     case ICE_CANDIDATE_TYPE_HOST:
       return 126;
+    case ICE_CANDIDATE_TYPE_PRFLX:
+      return 110;
     case ICE_CANDIDATE_TYPE_SRFLX:
       return 100;
     case ICE_CANDIDATE_TYPE_RELAY:
@@ -24,16 +26,17 @@ static uint8_t ice_candidate_type_preference(IceCandidateType type) {
   }
 }
 
-static uint16_t ice_candidate_local_preference(IceCandidate* candidate) {
-  return candidate->addr.port;
-}
-
-static void ice_candidate_priority(IceCandidate* candidate) {
+static void ice_candidate_priority(IceCandidate* candidate,
+                                   uint16_t local_preference) {
   // priority = (2^24)*(type preference) + (2^8)*(local preference) + (256 - component ID)
-  candidate->priority = (1 << 24) * ice_candidate_type_preference(candidate->type) + (1 << 8) * ice_candidate_local_preference(candidate) + (256 - candidate->component);
+  candidate->priority = (1 << 24) * ice_candidate_type_preference(candidate->type) +
+                        (1 << 8) * local_preference +
+                        (256 - candidate->component);
 }
 
-void ice_candidate_create(IceCandidate* candidate, int foundation, IceCandidateType type, Address* addr) {
+void ice_candidate_create(IceCandidate* candidate, int foundation,
+                          IceCandidateType type, Address* addr,
+                          uint16_t local_preference) {
   memcpy(&candidate->addr, addr, sizeof(Address));
   candidate->type = type;
 
@@ -41,7 +44,7 @@ void ice_candidate_create(IceCandidate* candidate, int foundation, IceCandidateT
   // 1: RTP, 2: RTCP
   candidate->component = 1;
 
-  ice_candidate_priority(candidate);
+  ice_candidate_priority(candidate, local_preference);
 
   snprintf(candidate->transport, sizeof(candidate->transport), "%s", "UDP");
 }
@@ -106,6 +109,7 @@ int ice_candidate_from_description(IceCandidate* candidate, char* description, c
     LOGE("Only UDP transport is supported");
     return -1;
   }
+  snprintf(candidate->transport, sizeof(candidate->transport), "%s", "UDP");
 
   if (strncmp(type, "host", 4) == 0) {
     candidate->type = ICE_CANDIDATE_TYPE_HOST;

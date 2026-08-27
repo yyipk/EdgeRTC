@@ -63,7 +63,9 @@ static inline uint64_t ice_candidate_pair_rfc8445(uint32_t controlling_priority,
          (controlling_priority > controlled_priority ? 1 : 0);
 }
 
-void ice_candidate_create(IceCandidate* ice_candidate, int foundation, IceCandidateType type, Address* addr);
+void ice_candidate_create(IceCandidate* candidate, int foundation,
+                          IceCandidateType type, Address* addr,
+                          uint16_t local_preference);
 
 void ice_candidate_to_description(IceCandidate* candidate, char* description, int length);
 

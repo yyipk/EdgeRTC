@@ -228,7 +228,10 @@ PeerConnection* peer_connection_create(PeerConfiguration* config) {
 
   memcpy(&pc->config, config, sizeof(PeerConfiguration));
 
-  agent_create(&pc->agent);
+  if (agent_create(&pc->agent) < 0) {
+    free(pc);
+    return NULL;
+  }
 
   memset(&pc->sctp, 0, sizeof(pc->sctp));
 

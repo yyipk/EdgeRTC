@@ -60,6 +60,12 @@ typedef struct TurnState {
   uint8_t channel_bound;
 } TurnState;
 
+typedef struct NatPmpState {
+  uint32_t gateway_addr;
+  uint16_t internal_port;
+  uint16_t external_port;
+} NatPmpState;
+
 struct Agent {
   char remote_ufrag[ICE_UFRAG_LENGTH + 1];
   char remote_upwd[ICE_UPWD_LENGTH + 1];
@@ -95,6 +101,7 @@ struct Agent {
   uint32_t transaction_id[3];
   uint32_t conncheck_transaction_id[3];
   TurnState turn;
+  NatPmpState nat_pmp;
   StunMessage recv_msg;
   StunMessage send_msg;
 };

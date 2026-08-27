@@ -276,7 +276,8 @@ int main(void) {
   remote = &agent.remote_candidates[0];
   assert(addr_from_string("192.0.2.1", &remote->addr) == 1);
   addr_set_port(&remote->addr, 5004);
-  ice_candidate_create(remote, 1, ICE_CANDIDATE_TYPE_HOST, &remote->addr);
+  ice_candidate_create(remote, 1, ICE_CANDIDATE_TYPE_HOST, &remote->addr,
+                       UINT16_MAX);
   pair = &agent.candidate_pairs[0];
   pair->local = relay;
   pair->remote = remote;

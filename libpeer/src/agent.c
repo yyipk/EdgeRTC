@@ -7,6 +7,7 @@
 #include "agent.h"
 #include "base64.h"
 #include "ice.h"
+#include "nat_pmp.h"
 #include "ports.h"
 #include "socket.h"
 #include "stun.h"
@@ -21,8 +22,10 @@
 #define AGENT_TURN_CHANNEL_REFRESH_MS 480000
 #define AGENT_TURN_REQUEST_TIMEOUT_MS 500
 #define AGENT_STUN_RECV_MAXTIMES 1000
+#define AGENT_NAT_PMP_LIFETIME 7200
 
 static int agent_turn_refresh(Agent* agent, uint32_t lifetime);
+static void agent_delete_nat_pmp_mapping(Agent* agent);
 
 static const char* agent_candidate_type_name(IceCandidateType type) {
   switch (type) {
@@ -97,6 +100,42 @@ static IceCandidatePair* agent_find_candidate_pair(Agent* agent, IceCandidate* l
   return NULL;
 }
 
+static int agent_candidate_identity_equal(const IceCandidate* first,
+                                          const IceCandidate* second) {
+  return first->component == second->component &&
+         first->type == second->type &&
+         strcmp(first->transport, second->transport) == 0 &&
+         addr_equal(&first->addr, &second->addr);
+}
+
+static IceCandidatePair* agent_find_equivalent_candidate_pair(Agent* agent,
+                                                              IceCandidate* local,
+                                                              IceCandidate* remote) {
+  int i;
+
+  for (i = 0; i < agent->candidate_pairs_num; i++) {
+    IceCandidatePair* pair = &agent->candidate_pairs[i];
+    int pair_uses_relay = pair->local->type == ICE_CANDIDATE_TYPE_RELAY;
+    int candidate_uses_relay = local->type == ICE_CANDIDATE_TYPE_RELAY;
+
+    if (pair->local->component != local->component ||
+        pair->remote->component != remote->component ||
+        strcmp(pair->local->transport, local->transport) != 0 ||
+        strcmp(pair->remote->transport, remote->transport) != 0 ||
+        !addr_equal(&pair->remote->addr, &remote->addr) ||
+        pair_uses_relay != candidate_uses_relay) {
+      continue;
+    }
+    if ((!candidate_uses_relay &&
+         pair->local->addr.family == local->addr.family) ||
+        (candidate_uses_relay &&
+         addr_equal(&pair->local->addr, &local->addr))) {
+      return pair;
+    }
+  }
+  return NULL;
+}
+
 static IceCandidatePair* agent_queue_triggered_check(Agent* agent,
                                                      StunMessage* stun_msg,
                                                      Address* addr,
@@ -118,7 +157,8 @@ static IceCandidatePair* agent_queue_triggered_check(Agent* agent,
     }
     remote = &agent->remote_candidates[agent->remote_candidates_count];
     memset(remote, 0, sizeof(*remote));
-    ice_candidate_create(remote, agent->remote_candidates_count, ICE_CANDIDATE_TYPE_PRFLX, addr);
+    ice_candidate_create(remote, agent->remote_candidates_count,
+                         ICE_CANDIDATE_TYPE_PRFLX, addr, UINT16_MAX);
     remote->priority = stun_msg->priority;
     agent->remote_candidates_count++;
     addr_to_string(addr, addr_string, sizeof(addr_string));
@@ -180,6 +220,7 @@ void agent_clear_candidates(Agent* agent) {
   if (agent->turn.allocated) {
     agent_turn_refresh(agent, 0);
   }
+  agent_delete_nat_pmp_mapping(agent);
   memset(agent->remote_ufrag, 0, sizeof(agent->remote_ufrag));
   memset(agent->remote_upwd, 0, sizeof(agent->remote_upwd));
   agent->local_candidates_count = 0;
@@ -191,6 +232,7 @@ void agent_clear_candidates(Agent* agent) {
   agent->consent_last_send_ms = 0;
   memset(agent->consent_transaction_id, 0, sizeof(agent->consent_transaction_id));
   memset(&agent->turn, 0, sizeof(agent->turn));
+  memset(&agent->nat_pmp, 0, sizeof(agent->nat_pmp));
 }
 
 int agent_create(Agent* agent) {
@@ -208,6 +250,7 @@ int agent_create(Agent* agent) {
 #if CONFIG_IPV6
   if ((ret = udp_socket_open(&agent->udp_sockets[1], AF_INET6, 0)) < 0) {
     LOGE("Failed to create IPv6 UDP socket.");
+    udp_socket_close(&agent->udp_sockets[0]);
     return ret;
   }
   LOGI("create IPv6 UDP socket: %d", agent->udp_sockets[1].fd);
@@ -222,14 +265,11 @@ void agent_destroy(Agent* agent) {
     agent_turn_refresh(agent, 0);
     agent->turn.allocated = 0;
   }
-  if (agent->udp_sockets[0].fd > 0) {
-    udp_socket_close(&agent->udp_sockets[0]);
-  }
+  agent_delete_nat_pmp_mapping(agent);
+  udp_socket_close(&agent->udp_sockets[0]);
 
 #if CONFIG_IPV6
-  if (agent->udp_sockets[1].fd > 0) {
-    udp_socket_close(&agent->udp_sockets[1]);
-  }
+  udp_socket_close(&agent->udp_sockets[1]);
 #endif
 }
 
@@ -334,8 +374,9 @@ static int agent_create_host_addr(Agent* agent) {
     for (j = 0; j < sizeof(iface_prefx) / sizeof(iface_prefx[0]); j++) {
       ice_candidate = agent->local_candidates + agent->local_candidates_count;
       // only copy port and family to addr of ice candidate
-      ice_candidate_create(ice_candidate, agent->local_candidates_count, ICE_CANDIDATE_TYPE_HOST,
-                           &agent->udp_sockets[i].bind_addr);
+      ice_candidate_create(ice_candidate, agent->local_candidates_count,
+                           ICE_CANDIDATE_TYPE_HOST,
+                           &agent->udp_sockets[i].bind_addr, UINT16_MAX);
       // if resolve host addr, add to local candidate
       if (ports_get_host_addr(&ice_candidate->addr, iface_prefx[j])) {
         agent->local_candidates_count++;
@@ -344,6 +385,73 @@ static int agent_create_host_addr(Agent* agent) {
   }
 
   return 0;
+}
+
+static IceCandidate* agent_find_ipv4_host_candidate(Agent* agent) {
+  int i;
+
+  for (i = 0; i < agent->local_candidates_count; i++) {
+    if (agent->local_candidates[i].type == ICE_CANDIDATE_TYPE_HOST &&
+        agent->local_candidates[i].addr.family == AF_INET) {
+      return &agent->local_candidates[i];
+    }
+  }
+  return NULL;
+}
+
+static int agent_create_nat_pmp_addr(Agent* agent) {
+  char addr_string[ADDRSTRLEN];
+  IceCandidate* host = agent_find_ipv4_host_candidate(agent);
+  IceCandidate* candidate;
+  Address gateway;
+  Address external_addr;
+  uint32_t lifetime;
+  uint16_t internal_port = agent->udp_sockets[0].bind_addr.port;
+
+  if (host == NULL ||
+      agent->local_candidates_count >= AGENT_MAX_CANDIDATES ||
+      !ports_get_default_gateway(&gateway)) {
+    return -1;
+  }
+
+  addr_set_port(&gateway, NAT_PMP_PORT);
+  if (nat_pmp_map(&gateway, internal_port, internal_port,
+                  AGENT_NAT_PMP_LIFETIME, &external_addr, &lifetime) < 0) {
+    LOGD("NAT-PMP mapping is unavailable");
+    return -1;
+  }
+
+  candidate = &agent->local_candidates[agent->local_candidates_count];
+  ice_candidate_create(candidate, agent->local_candidates_count,
+                       ICE_CANDIDATE_TYPE_SRFLX, &external_addr,
+                       UINT16_MAX);
+  candidate->raddr = host->addr;
+  agent->local_candidates_count++;
+  agent->nat_pmp.gateway_addr = gateway.sin.sin_addr.s_addr;
+  agent->nat_pmp.internal_port = internal_port;
+  agent->nat_pmp.external_port = external_addr.port;
+  addr_to_string(&external_addr, addr_string, sizeof(addr_string));
+  LOGI("NAT-PMP srflx candidate gathered: %s:%d, lifetime=%u seconds",
+       addr_string, external_addr.port, (unsigned int)lifetime);
+  return 0;
+}
+
+static void agent_delete_nat_pmp_mapping(Agent* agent) {
+  Address external_addr;
+  Address gateway;
+  uint32_t lifetime;
+
+  if (agent->nat_pmp.gateway_addr == 0) {
+    return;
+  }
+
+  memset(&gateway, 0, sizeof(gateway));
+  addr_set_family(&gateway, AF_INET);
+  gateway.sin.sin_addr.s_addr = agent->nat_pmp.gateway_addr;
+  addr_set_port(&gateway, NAT_PMP_PORT);
+  nat_pmp_map(&gateway, agent->nat_pmp.internal_port,
+              0, 0, &external_addr, &lifetime);
+  memset(&agent->nat_pmp, 0, sizeof(agent->nat_pmp));
 }
 
 static int agent_create_stun_addr(Agent* agent, Address* serv_addr) {
@@ -371,7 +479,8 @@ static int agent_create_stun_addr(Agent* agent, Address* serv_addr) {
   }
   candidate = &agent->local_candidates[agent->local_candidates_count];
   ice_candidate_create(candidate, agent->local_candidates_count,
-                       ICE_CANDIDATE_TYPE_SRFLX, &response->mapped_addr);
+                       ICE_CANDIDATE_TYPE_SRFLX, &response->mapped_addr,
+                       UINT16_MAX - 1);
   agent->local_candidates_count++;
   LOGI("STUN srflx candidate gathered");
   return ret;
@@ -541,7 +650,7 @@ static int agent_create_turn_addr(Agent* agent, Address* serv_addr,
   candidate = &agent->local_candidates[agent->local_candidates_count];
   ice_candidate_create(candidate, agent->local_candidates_count,
                        ICE_CANDIDATE_TYPE_RELAY,
-                       &response->relayed_addr);
+                       &response->relayed_addr, UINT16_MAX);
   candidate->raddr = response->mapped_addr;
   agent->local_candidates_count++;
   agent->turn.lifetime = response->lifetime != 0
@@ -678,6 +787,7 @@ void agent_gather_candidate(Agent* agent, const char* urls, const char* username
 
   if (urls == NULL) {
     agent_create_host_addr(agent);
+    agent_create_nat_pmp_addr(agent);
     return;
   }
 
@@ -1093,8 +1203,8 @@ int agent_add_remote_candidate(Agent* agent, char* description, char* end) {
   }
 
   for (i = 0; i < agent->remote_candidates_count; i++) {
-    if (strcmp(agent->remote_candidates[i].foundation,
-               candidate.foundation) == 0) {
+    if (agent_candidate_identity_equal(&agent->remote_candidates[i],
+                                       &candidate)) {
       return 0;
     }
   }
@@ -1145,8 +1255,21 @@ void agent_update_candidate_pairs(Agent* agent) {
       if (agent->local_candidates[i].addr.family == agent->remote_candidates[j].addr.family) {
         IceCandidatePair* pair = agent_find_candidate_pair(
             agent, &agent->local_candidates[i], &agent->remote_candidates[j]);
+        uint64_t priority;
 
         if (pair != NULL) {
+          continue;
+        }
+        priority = agent_candidate_pair_priority(
+            agent, &agent->local_candidates[i], &agent->remote_candidates[j]);
+        pair = agent_find_equivalent_candidate_pair(
+            agent, &agent->local_candidates[i], &agent->remote_candidates[j]);
+        if (pair != NULL) {
+          if (priority > pair->priority) {
+            pair->local = &agent->local_candidates[i];
+            pair->remote = &agent->remote_candidates[j];
+            pair->priority = priority;
+          }
           continue;
         }
         if (agent->candidate_pairs_num >= AGENT_MAX_CANDIDATE_PAIRS) {
@@ -1157,7 +1280,7 @@ void agent_update_candidate_pairs(Agent* agent) {
 
         pair->local = &agent->local_candidates[i];
         pair->remote = &agent->remote_candidates[j];
-        pair->priority = agent_candidate_pair_priority(agent, pair->local, pair->remote);
+        pair->priority = priority;
         pair->state = ICE_CANDIDATE_STATE_FROZEN;
         pair->nominated = 0;
         agent->candidate_pairs_num++;

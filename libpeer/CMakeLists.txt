@@ -31,6 +31,7 @@ if(COMMAND sdk_generate_library)
     src/dtls_srtp.c
     src/ice.c
     src/mdns.c
+    src/nat_pmp.c
     src/peer.c
     src/peer_connection.c
     src/peer_signaling.c

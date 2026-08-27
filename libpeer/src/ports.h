@@ -10,6 +10,8 @@ int ports_resolve_mdns_host(const char* host, Address* addr);
 
 int ports_get_host_addr(Address* addr, const char* iface_prefix);
 
+int ports_get_default_gateway(Address* addr);
+
 int ports_get_mac_addr(uint8_t mac[6]);
 
 uint32_t ports_get_epoch_time();
