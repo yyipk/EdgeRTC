@@ -1,6 +1,7 @@
 sdk_generate_library(aligenie_ns)
 
 sdk_add_include_directories(.)
+sdk_add_private_include_directories(${EDGERTC_ACCEL_DIR})
 sdk_add_private_compile_options(-include${CMAKE_CURRENT_LIST_DIR}/ns_rv32_abi.h)
 
 sdk_library_add_sources(
@@ -25,3 +26,9 @@ sdk_library_add_sources(
     tdereverb_x_recovered.c
     tspl_sin_table_1024_recovered.c
 )
+
+if(CMAKE_C_COMPILER MATCHES "riscv")
+    sdk_library_add_sources(${EDGERTC_ACCEL_DIR}/e907/dsp_fft.c)
+else()
+    sdk_library_add_sources(${EDGERTC_ACCEL_DIR}/generic/dsp_fft.c)
+endif()

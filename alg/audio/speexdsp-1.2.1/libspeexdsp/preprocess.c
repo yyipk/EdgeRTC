@@ -67,6 +67,7 @@
 #include "filterbank.h"
 #include "math_approx.h"
 #include "os_support.h"
+#include "dsp_kernels.h"
 
 #define LOUDNESS_EXP 5.f
 #define AMP_SCALE .001f
@@ -630,8 +631,15 @@ static void preprocess_analysis(SpeexPreprocessState *st, spx_int16_t *x)
       st->inbuf[i]=x[N4+i];
 
    /* Windowing */
-   for (i=0;i<2*N;i++)
-      st->frame[i] = MULT16_16_Q15(st->frame[i], st->window[i]);
+   for (i=0;i<2*N;i+=2)
+   {
+      spx_word32_t product0, product1;
+      dsp_i16x2_mul(st->frame[i], st->window[i],
+                    st->frame[i+1], st->window[i+1],
+                    &product0, &product1);
+      st->frame[i] = SHR32(product0, 15);
+      st->frame[i+1] = SHR32(product1, 15);
+   }
 
 #ifdef FIXED_POINT
    {
@@ -650,7 +658,13 @@ static void preprocess_analysis(SpeexPreprocessState *st, spx_int16_t *x)
    /* Power spectrum */
    ps[0]=MULT16_16(st->ft[0],st->ft[0]);
    for (i=1;i<N;i++)
-      ps[i]=MULT16_16(st->ft[2*i-1],st->ft[2*i-1]) + MULT16_16(st->ft[2*i],st->ft[2*i]);
+   {
+      spx_word32_t square0, square1;
+      dsp_i16x2_mul(st->ft[2*i-1], st->ft[2*i-1],
+                    st->ft[2*i], st->ft[2*i],
+                    &square0, &square1);
+      ps[i] = ADD32(square0, square1);
+   }
    for (i=0;i<N;i++)
       st->ps[i] = PSHR32(st->ps[i], 2*st->frame_shift);
 
@@ -939,8 +953,12 @@ EXPORT int speex_preprocess_run(SpeexPreprocessState *st, spx_int16_t *x)
    /* Apply computed gain */
    for (i=1;i<N;i++)
    {
-      st->ft[2*i-1] = MULT16_16_P15(st->gain2[i],st->ft[2*i-1]);
-      st->ft[2*i] = MULT16_16_P15(st->gain2[i],st->ft[2*i]);
+      spx_word32_t product0, product1;
+      dsp_i16x2_mul(st->gain2[i], st->ft[2*i-1],
+                    st->gain2[i], st->ft[2*i],
+                    &product0, &product1);
+      st->ft[2*i-1] = SHR32(ADD32(16384, product0), 15);
+      st->ft[2*i] = SHR32(ADD32(16384, product1), 15);
    }
    st->ft[0] = MULT16_16_P15(st->gain2[0],st->ft[0]);
    st->ft[2*N-1] = MULT16_16_P15(st->gain2[N-1],st->ft[2*N-1]);
@@ -975,8 +993,15 @@ EXPORT int speex_preprocess_run(SpeexPreprocessState *st, spx_int16_t *x)
 #endif
 
    /* Synthesis window (for WOLA) */
-   for (i=0;i<2*N;i++)
-      st->frame[i] = MULT16_16_Q15(st->frame[i], st->window[i]);
+   for (i=0;i<2*N;i+=2)
+   {
+      spx_word32_t product0, product1;
+      dsp_i16x2_mul(st->frame[i], st->window[i],
+                    st->frame[i+1], st->window[i+1],
+                    &product0, &product1);
+      st->frame[i] = SHR32(product0, 15);
+      st->frame[i+1] = SHR32(product1, 15);
+   }
 
    /* Perform overlap and add */
    for (i=0;i<N3;i++)
@@ -1212,4 +1237,3 @@ EXPORT int speex_preprocess_ctl(SpeexPreprocessState *state, int request, void *
 #ifdef FIXED_DEBUG
 long long spx_mips=0;
 #endif
-

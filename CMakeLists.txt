@@ -1,5 +1,6 @@
 set(CMAKE_INTERPROCEDURAL_OPTIMIZATION TRUE)
 set(CMAKE_AR "${CMAKE_C_COMPILER_AR}")
+set(EDGERTC_ACCEL_DIR ${CMAKE_CURRENT_LIST_DIR}/alg/accel)
 
 add_library(edgertc_compile_options INTERFACE)
 target_compile_options(edgertc_compile_options INTERFACE -O2)
@@ -27,3 +28,8 @@ foreach(target liblibpeer libedgertc_jitter_buffer libaligenie_aec libaligenie_n
         target_link_libraries(${target} PRIVATE edgertc_compile_options)
     endif()
 endforeach()
+
+if(TARGET libspeexdsp AND CMAKE_C_COMPILER MATCHES "riscv")
+    target_sources(libspeexdsp PRIVATE
+                   alg/accel/e907/dsp_speex_fft_320.c)
+endif()

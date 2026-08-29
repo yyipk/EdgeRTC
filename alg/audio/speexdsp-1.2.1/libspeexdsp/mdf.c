@@ -75,6 +75,7 @@
 #include "pseudofloat.h"
 #include "math_approx.h"
 #include "os_support.h"
+#include "dsp_kernels.h"
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -216,8 +217,11 @@ static inline spx_word32_t mdf_inner_prod(const spx_word16_t *x, const spx_word1
    while(len--)
    {
       spx_word32_t part=0;
-      part = MAC16_16(part,*x++,*y++);
-      part = MAC16_16(part,*x++,*y++);
+      spx_word32_t product0, product1;
+      dsp_i16x2_mul(x[0], y[0], x[1], y[1], &product0, &product1);
+      x += 2;
+      y += 2;
+      part = ADD32(product0, product1);
       /* HINT: If you had a 40-bit accumulator, you could shift only at the end */
       sum = ADD32(sum,SHR32(part,6));
    }
@@ -231,7 +235,9 @@ static inline void power_spectrum(const spx_word16_t *X, spx_word32_t *ps, int N
    ps[0]=MULT16_16(X[0],X[0]);
    for (i=1,j=1;i<N-1;i+=2,j++)
    {
-      ps[j] =  MULT16_16(X[i],X[i]) + MULT16_16(X[i+1],X[i+1]);
+      spx_word32_t square0, square1;
+      dsp_i16x2_mul(X[i], X[i], X[i+1], X[i+1], &square0, &square1);
+      ps[j] = ADD32(square0, square1);
    }
    ps[j]=MULT16_16(X[i],X[i]);
 }
@@ -243,7 +249,9 @@ static inline void power_spectrum_accum(const spx_word16_t *X, spx_word32_t *ps,
    ps[0]+=MULT16_16(X[0],X[0]);
    for (i=1,j=1;i<N-1;i+=2,j++)
    {
-      ps[j] +=  MULT16_16(X[i],X[i]) + MULT16_16(X[i+1],X[i+1]);
+      spx_word32_t square0, square1;
+      dsp_i16x2_mul(X[i], X[i], X[i+1], X[i+1], &square0, &square1);
+      ps[j] = ADD32(ps[j], ADD32(square0, square1));
    }
    ps[j]+=MULT16_16(X[i],X[i]);
 }
@@ -264,8 +272,17 @@ static inline void spectral_mul_accum(const spx_word16_t *X, const spx_word32_t 
       tmp1 = tmp2 = 0;
       for (j=0;j<M;j++)
       {
-         tmp1 = SUB32(MAC16_16(tmp1, X[j*N+i],TOP16(Y[j*N+i])), MULT16_16(X[j*N+i+1],TOP16(Y[j*N+i+1])));
-         tmp2 = MAC16_16(MAC16_16(tmp2, X[j*N+i+1],TOP16(Y[j*N+i])), X[j*N+i], TOP16(Y[j*N+i+1]));
+         dsp_i16x2_t x;
+         dsp_i16x2_t y;
+         spx_word32_t real, imag;
+         spx_word16_t y0 = TOP16(Y[j*N+i]);
+         spx_word16_t y1 = TOP16(Y[j*N+i+1]);
+
+         x = dsp_i16x2_pack(X[j*N+i], X[j*N+i+1]);
+         y = dsp_i16x2_pack(y0, y1);
+         dsp_i16x2_cmul(x, y, &real, &imag);
+         tmp1 = ADD32(tmp1, real);
+         tmp2 = ADD32(tmp2, imag);
       }
       acc[i] = PSHR32(tmp1,WEIGHT_SHIFT);
       acc[i+1] = PSHR32(tmp2,WEIGHT_SHIFT);
@@ -291,8 +308,15 @@ static inline void spectral_mul_accum16(const spx_word16_t *X, const spx_word16_
       tmp1 = tmp2 = 0;
       for (j=0;j<M;j++)
       {
-         tmp1 = SUB32(MAC16_16(tmp1, X[j*N+i],Y[j*N+i]), MULT16_16(X[j*N+i+1],Y[j*N+i+1]));
-         tmp2 = MAC16_16(MAC16_16(tmp2, X[j*N+i+1],Y[j*N+i]), X[j*N+i], Y[j*N+i+1]);
+         dsp_i16x2_t x;
+         dsp_i16x2_t y;
+         spx_word32_t real, imag;
+
+         x = dsp_i16x2_pack(X[j*N+i], X[j*N+i+1]);
+         y = dsp_i16x2_pack(Y[j*N+i], Y[j*N+i+1]);
+         dsp_i16x2_cmul(x, y, &real, &imag);
+         tmp1 = ADD32(tmp1, real);
+         tmp2 = ADD32(tmp2, imag);
       }
       acc[i] = PSHR32(tmp1,WEIGHT_SHIFT);
       acc[i+1] = PSHR32(tmp2,WEIGHT_SHIFT);

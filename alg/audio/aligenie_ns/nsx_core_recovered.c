@@ -6,6 +6,7 @@
  * inject instructions.
  */
 #include "ns_c_recovered.h"
+#include "dsp_kernels.h"
 
 #include <limits.h>
 #include <string.h>
@@ -399,10 +400,9 @@ int TNRx_InitCore(NsxHandle inst, uint32_t fs)
     inst->denoiseBound = 8192;
     inst->gainMap = 0;
 
-    if (Init_TDereverb_x_Params(&inst->pTDPar, inst->magnLen, fs)) {
-        inst->Dereverb_switch = 0;
-        inst->initFlag = 1;
-    }
+    memset(&inst->pTDPar, 0, sizeof(inst->pTDPar));
+    inst->Dereverb_switch = 0;
+    inst->initFlag = 1;
     return 0;
 }
 
@@ -439,10 +439,21 @@ int TNRx_set_dereverb_core(NsxHandle inst, int mode)
 {
     if ((unsigned int)mode > 1)
         return -1;
-    if (mode == 0)
+    if (mode == 0) {
+        if (inst->pTDPar.Y2 != NULL) {
+            Delete_TDereverb_x_Params(&inst->pTDPar);
+            memset(&inst->pTDPar, 0, sizeof(inst->pTDPar));
+        }
         inst->Dereverb_switch = 0;
-    else
-        inst->Dereverb_switch = 1;
+        return 0;
+    }
+    if (inst->pTDPar.Y2 == NULL &&
+        !Init_TDereverb_x_Params(&inst->pTDPar, inst->magnLen, inst->fs)) {
+        Delete_TDereverb_x_Params(&inst->pTDPar);
+        memset(&inst->pTDPar, 0, sizeof(inst->pTDPar));
+        return -1;
+    }
+    inst->Dereverb_switch = 1;
     return 0;
 }
 
@@ -1022,9 +1033,15 @@ void TNRx_DataAnalysis(NsxHandle inst, int16_t *speech_frame, uint16_t *magn)
            (size_t)(inst->anaLen - inst->blockLen10ms) * sizeof(int16_t));
     memcpy(inst->analysisBuffer + inst->anaLen - inst->blockLen10ms,
            speech_frame, (size_t)inst->blockLen10ms * sizeof(int16_t));
-    for (i = 0; i < inst->anaLen; i++) {
-        winData[i] = (int16_t)(((int32_t)inst->window[i] *
-                                inst->analysisBuffer[i] + 8192) >> 14);
+    for (i = 0; i < inst->anaLen; i += 2) {
+        int32_t product0;
+        int32_t product1;
+
+        dsp_i16x2_mul(inst->window[i], inst->analysisBuffer[i],
+                      inst->window[i + 1], inst->analysisBuffer[i + 1],
+                      &product0, &product1);
+        winData[i] = (int16_t)((product0 + 8192) >> 14);
+        winData[i + 1] = (int16_t)((product1 + 8192) >> 14);
     }
     inst->energyIn = TSpl_Energy(winData, (size_t)inst->anaLen,
                                  &inst->scaleEnergyIn);
@@ -1057,9 +1074,16 @@ void TNRx_DataAnalysis(NsxHandle inst, int16_t *speech_frame, uint16_t *magn)
     inst->imag[inst->anaLen2] = 0;
     inst->real[0] = realImag[0];
     inst->real[inst->anaLen2] = realImag[inst->anaLen];
-    inst->magnEnergy = (uint32_t)((int32_t)inst->real[0] * inst->real[0]);
-    inst->magnEnergy += (uint32_t)((int32_t)inst->real[inst->anaLen2] *
-                                   inst->real[inst->anaLen2]);
+    {
+        int32_t square0;
+        int32_t square1;
+
+        dsp_i16x2_mul(inst->real[0], inst->real[0],
+                      inst->real[inst->anaLen2],
+                      inst->real[inst->anaLen2], &square0, &square1);
+        inst->magnEnergy = (uint32_t)square0;
+        inst->magnEnergy += (uint32_t)square1;
+    }
     magn[0] = (uint16_t)(inst->real[0] >= 0 ? inst->real[0] : -inst->real[0]);
     magn[inst->anaLen2] = (uint16_t)(inst->real[inst->anaLen2] >= 0 ?
         inst->real[inst->anaLen2] : -inst->real[inst->anaLen2]);
@@ -1090,8 +1114,16 @@ void TNRx_DataAnalysis(NsxHandle inst, int16_t *speech_frame, uint16_t *magn)
         j = i << 1;
         inst->real[i] = realImag[j];
         inst->imag[i] = (int16_t)-realImag[j + 1];
-        tmpU32no1 = (uint32_t)((int32_t)realImag[j] * realImag[j]);
-        tmpU32no1 += (uint32_t)((int32_t)realImag[j + 1] * realImag[j + 1]);
+        {
+            int32_t square0;
+            int32_t square1;
+
+            dsp_i16x2_mul(realImag[j], realImag[j],
+                          realImag[j + 1], realImag[j + 1],
+                          &square0, &square1);
+            tmpU32no1 = (uint32_t)square0;
+            tmpU32no1 += (uint32_t)square1;
+        }
         inst->magnEnergy += tmpU32no1;
         magn[i] = (uint16_t)TSpl_Sqrt((int32_t)tmpU32no1);
         inst->sumMagn += magn[i];
@@ -1198,10 +1230,15 @@ void TNRx_DataSynthesis(NsxHandle inst, int16_t *out_frame, int tns_mode)
     }
 
     for (i = 0; i < inst->magnLen; i++) {
-        inst->real[i] = (int16_t)((inst->real[i] *
-                                   (int16_t)inst->noiseSupFilter[i]) >> 14);
-        inst->imag[i] = (int16_t)((inst->imag[i] *
-                                   (int16_t)inst->noiseSupFilter[i]) >> 14);
+        int32_t product0;
+        int32_t product1;
+
+        dsp_i16x2_mul(inst->real[i],
+                      (int16_t)inst->noiseSupFilter[i], inst->imag[i],
+                      (int16_t)inst->noiseSupFilter[i],
+                      &product0, &product1);
+        inst->real[i] = (int16_t)(product0 >> 14);
+        inst->imag[i] = (int16_t)(product1 >> 14);
     }
     if (inst->Dereverb_switch == 1) {
         for (i = 0; i < inst->magnLen; i++) {
@@ -1266,13 +1303,25 @@ void TNRx_DataSynthesis(NsxHandle inst, int16_t *out_frame, int tns_mode)
         gain_factor = (int16_t)(tmp16no1 + tmp16no2);
     }
 
-    for (i = 0; i < inst->anaLen; i++) {
-        tmp16no1 = (int16_t)((inst->window[i] * inst->real[i] + 8192) >>
-                             14);
-        tmp32no1 = (tmp16no1 * gain_factor + 4096) >> 13;
-        tmp16no2 = sat_w32_to_w16(tmp32no1);
+    for (i = 0; i < inst->anaLen; i += 2) {
+        int32_t product0;
+        int32_t product1;
+        int16_t windowed0;
+        int16_t windowed1;
+
+        dsp_i16x2_mul(inst->window[i], inst->real[i],
+                      inst->window[i + 1], inst->real[i + 1],
+                      &product0, &product1);
+        windowed0 = (int16_t)((product0 + 8192) >> 14);
+        windowed1 = (int16_t)((product1 + 8192) >> 14);
+        dsp_i16x2_mul(windowed0, gain_factor, windowed1, gain_factor,
+                      &product0, &product1);
+        tmp16no1 = sat_w32_to_w16((product0 + 4096) >> 13);
+        tmp16no2 = sat_w32_to_w16((product1 + 4096) >> 13);
         inst->synthesisBuffer[i] =
-            TSpl_AddSatW16(inst->synthesisBuffer[i], tmp16no2);
+            TSpl_AddSatW16(inst->synthesisBuffer[i], tmp16no1);
+        inst->synthesisBuffer[i + 1] =
+            TSpl_AddSatW16(inst->synthesisBuffer[i + 1], tmp16no2);
     }
 
     for (i = 0; i < inst->blockLen10ms; i++)

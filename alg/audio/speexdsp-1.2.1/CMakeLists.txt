@@ -1,6 +1,7 @@
 sdk_generate_library(speexdsp)
 
 sdk_add_include_directories(include)
+sdk_add_private_include_directories(${EDGERTC_ACCEL_DIR})
 
 sdk_add_private_compile_options(-UHAVE_CONFIG_H)
 sdk_add_private_compile_definitions(

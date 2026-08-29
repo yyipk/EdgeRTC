@@ -36,8 +36,12 @@
 #include "config.h"
 #endif
 
+#include <math.h>
+
 #include "arch.h"
 #include "os_support.h"
+#include "dsp_kernels.h"
+#include "dsp_speex_fft_320.h"
 
 #define MAX_FFT_SIZE 2048
 
@@ -46,33 +50,46 @@ static int maximize_range(spx_word16_t *in, spx_word16_t *out, spx_word16_t boun
 {
    int i, shift;
    spx_word16_t max_val = 0;
-   for (i=0;i<len;i++)
+   for (i=0;i+1<len;i+=2)
    {
-      if (in[i]>max_val)
-         max_val = in[i];
-      if (-in[i]>max_val)
-         max_val = -in[i];
+      int pair_max = dsp_i16x2_max_abs(dsp_i16x2_load(in+i));
+      if (pair_max>max_val)
+         max_val = pair_max;
    }
+   if (i<len && in[i]>max_val)
+      max_val = in[i];
+   if (i<len && -in[i]>max_val)
+      max_val = -in[i];
    shift=0;
    while (max_val <= (bound>>1) && max_val != 0)
    {
       max_val <<= 1;
       shift++;
    }
-   for (i=0;i<len;i++)
+   if (shift == 0)
+      return 0;
+   for (i=0;i+1<len;i+=2)
    {
-      out[i] = SHL16(in[i], shift);
+      dsp_i16x2_store(out+i,
+         dsp_i16x2_shift_left(dsp_i16x2_load(in+i), shift));
    }
+   if (i<len)
+      out[i] = SHL16(in[i], shift);
    return shift;
 }
 
 static void renorm_range(spx_word16_t *in, spx_word16_t *out, int shift, int len)
 {
    int i;
-   for (i=0;i<len;i++)
+   if (shift == 0)
+      return;
+   for (i=0;i+1<len;i+=2)
    {
-      out[i] = PSHR16(in[i], shift);
+      dsp_i16x2_store(out+i,
+         dsp_i16x2_shift_right_round(dsp_i16x2_load(in+i), shift));
    }
+   if (i<len)
+      out[i] = PSHR16(in[i], shift);
 }
 #endif
 
@@ -292,6 +309,50 @@ void spx_ifft(void *table, spx_word16_t *in, spx_word16_t *out)
 
 #elif defined(USE_KISS_FFT)
 
+#if DSP_SPEEX_FFT_320_AVAILABLE
+
+struct kiss_config {
+   dsp_speex_fft_320_t fft;
+   int N;
+};
+
+void *spx_fft_init(int size)
+{
+   struct kiss_config *table;
+
+   if (size != DSP_SPEEX_FFT_320_SAMPLES)
+      return NULL;
+   table = (struct kiss_config *)speex_alloc(sizeof(*table));
+   if (table != NULL)
+      table->N = size;
+   return table;
+}
+
+void spx_fft_destroy(void *table)
+{
+   speex_free(table);
+}
+
+void spx_fft(void *table, spx_word16_t *in, spx_word16_t *out)
+{
+   int shift;
+   struct kiss_config *t = (struct kiss_config *)table;
+
+   shift = maximize_range(in, in, 32000, t->N);
+   dsp_speex_fft_320_forward(&t->fft, in, out);
+   renorm_range(in, in, shift, t->N);
+   renorm_range(out, out, shift, t->N);
+}
+
+void spx_ifft(void *table, spx_word16_t *in, spx_word16_t *out)
+{
+   struct kiss_config *t = (struct kiss_config *)table;
+
+   dsp_speex_fft_320_inverse(&t->fft, in, out);
+}
+
+#else
+
 #include "kiss_fftr.h"
 #include "kiss_fft.h"
 
@@ -364,6 +425,8 @@ void spx_ifft(void *table, spx_word16_t *in, spx_word16_t *out)
    struct kiss_config *t = (struct kiss_config *)table;
    kiss_fftri2(t->backward, in, out);
 }
+
+#endif
 
 
 #else

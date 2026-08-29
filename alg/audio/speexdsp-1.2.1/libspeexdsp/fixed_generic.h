@@ -35,6 +35,8 @@
 #ifndef FIXED_GENERIC_H
 #define FIXED_GENERIC_H
 
+#include "dsp_kernels.h"
+
 #define QCONST16(x,bits) ((spx_word16_t)(.5+(x)*(((spx_word32_t)1)<<(bits))))
 #define QCONST32(x,bits) ((spx_word32_t)(.5+(x)*(((spx_word32_t)1)<<(bits))))
 
@@ -78,8 +80,8 @@
 
 #define MAC16_16(c,a,b) (ADD32((c),MULT16_16((a),(b))))
 
-#define MULT16_32_P15(a,b) ADD32(MULT16_32_32(a,SHR((b),15)), PSHR(MULT16_16((a),((b)&0x00007fff)),15))
-#define MULT16_32_Q15(a,b) ADD32(MULT16_32_32(a,SHR((b),15)), SHR(MULT16_16((a),((b)&0x00007fff)),15))
+#define MULT16_32_P15(a,b) dsp_mul_i16_i32_p15((a), (b))
+#define MULT16_32_Q15(a,b) dsp_mul_i16_i32_q15((a), (b))
 #define MAC16_32_Q15(c,a,b) ADD32(c,MULT16_32_Q15(a,b))
 
 

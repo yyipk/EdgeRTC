@@ -32,6 +32,7 @@ struct kiss_fft_state{
     int nfft;
     int inverse;
     int factors[2*MAXFACTORS];
+    uint16_t *shuffle;
     kiss_fft_cpx twiddles[1];
 };
 
@@ -46,6 +47,7 @@ struct kiss_fft_state{
  * */
 #ifdef FIXED_POINT
 #include "arch.h"
+#include "dsp_kernels.h"
 # define FRACBITS 15
 # define SAMPPROD spx_int32_t
 #define SAMP_MAX 32767
@@ -65,12 +67,14 @@ struct kiss_fft_state{
 #   define S_MUL(a,b) sround( smul(a,b) )
 
 #   define C_MUL(m,a,b) \
-      do{ (m).r = sround( smul((a).r,(b).r) - smul((a).i,(b).i) ); \
-          (m).i = sround( smul((a).r,(b).i) + smul((a).i,(b).r) ); }while(0)
+      do { dsp_i16x2_store(&(m).r, \
+              dsp_i16x2_cmul_q15(dsp_i16x2_load(&(a).r), \
+                                  dsp_i16x2_load(&(b).r))); } while (0)
 
 #   define C_MUL4(m,a,b) \
-               do{ (m).r = PSHR32( smul((a).r,(b).r) - smul((a).i,(b).i),17 ); \
-               (m).i = PSHR32( smul((a).r,(b).i) + smul((a).i,(b).r),17 ); }while(0)
+      do { dsp_i16x2_store(&(m).r, \
+              dsp_i16x2_cmul_q13(dsp_i16x2_load(&(a).r), \
+                                  dsp_i16x2_load(&(b).r))); } while (0)
 
 #   define DIVSCALAR(x,k) \
 	(x) = sround( smul(  x, SAMP_MAX/k ) )

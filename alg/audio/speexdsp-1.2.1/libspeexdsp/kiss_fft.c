@@ -21,6 +21,7 @@ THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND 
 #include "_kiss_fft_guts.h"
 #include "arch.h"
 #include "os_support.h"
+#include "dsp_speex_fft.h"
 
 /* The guts header contains all the multiplication and addition macros that are defined for
  fixed or floating point complex numbers.  It also delares the kf_ internal functions.
@@ -97,6 +98,9 @@ static void kf_bfly4(
     const size_t m2=2*m;
     const size_t m3=3*m;
     int i, j;
+
+    if (dsp_speex_fft_bfly4(Fout, fstride, st, m, N, mm))
+        return;
 
     if (st->inverse)
     {
@@ -232,8 +236,11 @@ static void kf_bfly5(
     Fout2=Fout0+2*m;
     Fout3=Fout0+3*m;
     Fout4=Fout0+4*m;
-
     tw=st->twiddles;
+
+    if (dsp_speex_fft_bfly5(Fout, fstride, st, m))
+        return;
+
     for ( u=0; u<m; ++u ) {
         if (!st->inverse) {
         C_FIXDIV( *Fout0,5); C_FIXDIV( *Fout1,5); C_FIXDIV( *Fout2,5); C_FIXDIV( *Fout3,5); C_FIXDIV( *Fout4,5);
@@ -318,37 +325,36 @@ static void kf_bfly_generic(
     }
 }
 
-static
-void kf_shuffle(
-         kiss_fft_cpx * Fout,
-         const kiss_fft_cpx * f,
-         const size_t fstride,
-         int in_stride,
-         int * factors,
-         const kiss_fft_cfg st
-            )
+static uint16_t *kf_shuffle_init(uint16_t *shuffle, uint16_t input,
+                                size_t fstride, const int *factors)
 {
-   const int p=*factors++; /* the radix  */
-   const int m=*factors++; /* stage's fft length/p */
+   const int p = *factors++;
+   const int m = *factors++;
+   int j;
 
-    /*printf ("fft %d %d %d %d %d %d\n", p*m, m, p, s2, fstride*in_stride, N);*/
-   if (m==1)
+   if (m == 1)
    {
-      int j;
-      for (j=0;j<p;j++)
-      {
-         Fout[j] = *f;
-         f += fstride*in_stride;
+      for (j = 0; j < p; j++) {
+         *shuffle++ = input;
+         input += fstride;
       }
-   } else {
-      int j;
-      for (j=0;j<p;j++)
-      {
-         kf_shuffle( Fout , f, fstride*p, in_stride, factors,st);
-         f += fstride*in_stride;
-         Fout += m;
-      }
+      return shuffle;
    }
+
+   for (j = 0; j < p; j++) {
+      shuffle = kf_shuffle_init(shuffle, input, fstride * p, factors);
+      input += fstride;
+   }
+   return shuffle;
+}
+
+static void kf_shuffle(kiss_fft_cpx *Fout, const kiss_fft_cpx *f,
+                       int in_stride, const kiss_fft_cfg st)
+{
+   int i;
+
+   for (i = 0; i < st->nfft; i++)
+      Fout[i] = f[st->shuffle[i] * in_stride];
 }
 
 static
@@ -465,7 +471,7 @@ kiss_fft_cfg kiss_fft_alloc(int nfft,int inverse_fft,void * mem,size_t * lenmem 
 {
     kiss_fft_cfg st=NULL;
     size_t memneeded = sizeof(struct kiss_fft_state)
-        + sizeof(kiss_fft_cpx)*(nfft-1); /* twiddle factors*/
+        + sizeof(kiss_fft_cpx)*(nfft-1) + sizeof(uint16_t)*nfft;
 
     if ( lenmem==NULL ) {
         st = ( kiss_fft_cfg)KISS_FFT_MALLOC( memneeded );
@@ -478,6 +484,7 @@ kiss_fft_cfg kiss_fft_alloc(int nfft,int inverse_fft,void * mem,size_t * lenmem 
         int i;
         st->nfft=nfft;
         st->inverse = inverse_fft;
+        st->shuffle = (uint16_t *)(st->twiddles + nfft);
 #ifdef FIXED_POINT
         for (i=0;i<nfft;++i) {
             spx_word32_t phase = i;
@@ -495,6 +502,7 @@ kiss_fft_cfg kiss_fft_alloc(int nfft,int inverse_fft,void * mem,size_t * lenmem 
         }
 #endif
         kf_factor(nfft,st->factors);
+        kf_shuffle_init(st->shuffle, 0, 1, st->factors);
     }
     return st;
 }
@@ -511,7 +519,7 @@ void kiss_fft_stride(kiss_fft_cfg st,const kiss_fft_cpx *fin,kiss_fft_cpx *fout,
        kf_work(tmpbuf,fin,1,in_stride, st->factors,st);
        SPEEX_MOVE(fout,tmpbuf,st->nfft);*/
     } else {
-       kf_shuffle( fout, fin, 1,in_stride, st->factors,st);
+       kf_shuffle(fout, fin, in_stride, st);
        kf_work( fout, fin, 1,in_stride, st->factors,st, 1, in_stride, 1);
     }
 }
@@ -520,4 +528,3 @@ void kiss_fft(kiss_fft_cfg cfg,const kiss_fft_cpx *fin,kiss_fft_cpx *fout)
 {
     kiss_fft_stride(cfg,fin,fout,1);
 }
-

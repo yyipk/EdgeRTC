@@ -228,7 +228,7 @@ void win_smooth_x(int16_t *input, int16_t *output,
 void De_Late_reverb_x(int16_t *input, TDereverb_x_Param *pTDPar,
                       int16_t qMagn);
 
-extern int16_t TSpl_kSinTable1024[1024];
+extern const int16_t TSpl_kSinTable1024[1024];
 
 int16_t TSpl_AddSatW16(int16_t left, int16_t right);
 void TSpl_ComplexBitReverse(int16_t *frfi, int stages);
