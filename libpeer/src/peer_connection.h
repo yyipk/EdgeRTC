@@ -81,6 +81,7 @@ typedef struct PeerConfiguration {
   MediaCodec audio_codec;
   MediaCodec video_codec;
   DataChannelType datachannel;
+  size_t sctp_send_cache_max_packets;  // 0 disables the retransmit cache
 
   void (*onaudiotrack)(uint8_t* data, size_t size,
                        const RtpPacketMetadata* metadata,

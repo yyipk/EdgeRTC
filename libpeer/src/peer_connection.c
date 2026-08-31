@@ -241,6 +241,9 @@ PeerConnection* peer_connection_create(PeerConfiguration* config) {
   }
 
   memset(&pc->sctp, 0, sizeof(pc->sctp));
+#if !CONFIG_USE_USRSCTP
+  pc->sctp.sent_packet_limit = pc->config.sctp_send_cache_max_packets;
+#endif
 
   if (pc->config.audio_codec) {
     rtp_encoder_init(&pc->artp_encoder, pc->config.audio_codec,
@@ -479,6 +482,8 @@ int peer_connection_loop(PeerConnection* pc) {
           break;
         }
       }
+
+      sctp_process_timers(&pc->sctp);
 
       if (CONFIG_KEEPALIVE_TIMEOUT > 0 && agent_consent_check(&pc->agent) < 0) {
         STATE_CHANGED(pc, PEER_CONNECTION_CLOSED);

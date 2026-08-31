@@ -148,6 +148,10 @@ typedef enum SctpDataMode {
 
 #define SCTP_MAX_STREAMS 5
 
+#if !CONFIG_USE_USRSCTP
+typedef struct SctpSentPacket SctpSentPacket;
+#endif
+
 typedef struct {
   char label[32];  // Stream label
   uint16_t sid;    // Stream ID
@@ -175,9 +179,17 @@ typedef struct Sctp {
   uint8_t buf[CONFIG_MTU];
 
 #if !CONFIG_USE_USRSCTP
+  SctpSentPacket* sent_packets;
+  SctpSentPacket* sent_packets_tail;
+  size_t sent_packet_count;
+  size_t sent_packet_limit;
+  uint32_t last_sack_tsn;
+  uint32_t last_retransmit_check_ms;
   uint32_t last_pr_tsn;
   uint32_t gap_cumulative_tsn;
   uint32_t forward_state_since_ms;
+  uint32_t sack_count;
+  uint32_t forward_attempts;
   uint8_t peer_supports_forward_tsn;
   uint8_t forward_state;
 #endif
@@ -194,6 +206,8 @@ void sctp_usrsctp_deinit();
 int sctp_is_connected(Sctp* sctp);
 
 void sctp_incoming_data(Sctp* sctp, char* buf, size_t len);
+
+void sctp_process_timers(Sctp* sctp);
 
 int sctp_outgoing_data(Sctp* sctp, char* buf, size_t len,
                        SctpDataPpid ppid, uint16_t sid,
