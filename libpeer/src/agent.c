@@ -336,7 +336,6 @@ static int agent_socket_recv(Agent* agent, Address* addr, uint8_t* buf,
   } else {
     for (i = 0; i < sizeof(addr_type) / sizeof(addr_type[0]); i++) {
       if (FD_ISSET(agent->udp_sockets[i].fd, &rfds)) {
-        memset(buf, 0, len);
         ret = udp_socket_recvfrom(&agent->udp_sockets[i], addr, buf, len);
         break;
       }
@@ -1157,8 +1156,10 @@ static int agent_unwrap_turn_data(Agent* agent, Address* source,
 
 int agent_recv(Agent* agent, uint8_t* buf, int len, int* packet_consumed) {
   int ret = -1;
+  int recv_len;
   int via_turn = 0;
   StunMessage* stun_msg = &agent->recv_msg;
+  uint8_t* recv_buf;
   Address addr;
   char addr_string[ADDRSTRLEN];
 
@@ -1168,35 +1169,42 @@ int agent_recv(Agent* agent, uint8_t* buf, int len, int* packet_consumed) {
   if (packet_consumed != NULL) {
     *packet_consumed = 0;
   }
-  ret = agent_socket_recv(agent, &addr, stun_msg->buf,
-                          sizeof(stun_msg->buf));
+  recv_buf = agent->turn.allocated ? stun_msg->buf : buf;
+  recv_len = agent->turn.allocated ? (int)sizeof(stun_msg->buf) : len;
+  ret = agent_socket_recv(agent, &addr, recv_buf, recv_len);
   if (ret > 0) {
-    addr_to_string(&addr, addr_string, sizeof(addr_string));
     LOGD("ICE received UDP packet from %s:%d, len=%d",
-         addr_string, addr.port, ret);
+         addr_to_string(&addr, addr_string, sizeof(addr_string)) ?
+             addr_string : "?",
+         addr.port, ret);
     if (packet_consumed != NULL) {
       *packet_consumed = 1;
     }
-    ret = agent_unwrap_turn_data(agent, &addr, stun_msg, ret, &addr,
-                                 &via_turn);
-    if (ret > len) {
-      LOGW("Discarding received packet larger than caller buffer: %d > %d",
-           ret, len);
-      return 0;
-    }
-    if (ret > 0) {
-      memcpy(buf, stun_msg->buf, ret);
+    if (agent->turn.allocated) {
+      ret = agent_unwrap_turn_data(agent, &addr, stun_msg, ret, &addr,
+                                   &via_turn);
+      if (ret > len) {
+        LOGW("Discarding received packet larger than caller buffer: %d > %d",
+             ret, len);
+        return 0;
+      }
+      if (ret > 0) {
+        memcpy(buf, stun_msg->buf, ret);
+      }
     }
   }
   if (ret > 0 && stun_probe(buf, ret) == 0) {
     addr_to_string(&addr, addr_string, sizeof(addr_string));
+    if (buf != stun_msg->buf) {
+      memcpy(stun_msg->buf, buf, ret);
+    }
     stun_msg->size = ret;
     if (stun_parse_msg_buf(stun_msg) < 0) {
       LOGW("ICE discarded malformed STUN packet from %s:%d, len=%d",
            addr_string, addr.port, ret);
       return 0;
     }
-    LOGI("ICE received STUN packet from %s:%d, class=0x%04x, method=0x%04x",
+    LOGD("ICE received STUN packet from %s:%d, class=0x%04x, method=0x%04x",
          addr_string, addr.port, (unsigned int)stun_msg->stunclass,
          (unsigned int)stun_msg->stunmethod);
     switch (stun_msg->stunclass) {

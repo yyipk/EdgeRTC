@@ -420,7 +420,6 @@ int peer_connection_loop(PeerConnection* pc) {
   uint32_t ssrc = 0;
   int packet_consumed;
   int packet_count;
-  memset(pc->agent_buf, 0, sizeof(pc->agent_buf));
   pc->agent_ret = -1;
 
   switch (pc->state) {
