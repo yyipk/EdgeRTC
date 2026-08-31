@@ -22,6 +22,15 @@
 #define DTLS_CONTENT_TYPE_HANDSHAKE 22
 #define DTLS_HANDSHAKE_TYPE_CLIENT_HELLO 1
 
+static const int dtls_srtp_gcm_ciphersuites[] = {
+#if CONFIG_DTLS_USE_ECDSA
+  MBEDTLS_TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
+#else
+  MBEDTLS_TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+#endif
+  0,
+};
+
 typedef struct DtlsClientHelloFragment {
   uint16_t message_seq;
   size_t message_length;
@@ -366,6 +375,8 @@ int dtls_srtp_init(DtlsSrtp* dtls_srtp, DtlsSrtpRole role, void* user_data) {
                                 MBEDTLS_SSL_TRANSPORT_DATAGRAM,
                                 MBEDTLS_SSL_PRESET_DEFAULT);
   }
+
+  mbedtls_ssl_conf_ciphersuites(&dtls_srtp->conf, dtls_srtp_gcm_ciphersuites);
 
   dtls_srtp_x509_digest(&dtls_srtp->cert, dtls_srtp->local_fingerprint);
 
