@@ -28,6 +28,30 @@
 static int agent_turn_refresh(Agent* agent, uint32_t lifetime);
 static void agent_delete_nat_pmp_mapping(Agent* agent);
 
+static void agent_store_consent_transaction(Agent* agent,
+                                            const uint32_t transaction_id[3]) {
+  memcpy(agent->consent_transaction_ids[agent->consent_transaction_next],
+         transaction_id, sizeof(agent->consent_transaction_ids[0]));
+  agent->consent_transaction_next =
+      (agent->consent_transaction_next + 1) %
+      AGENT_CONSENT_TRANSACTION_COUNT;
+}
+
+static int agent_take_consent_transaction(Agent* agent,
+                                          const uint32_t transaction_id[3]) {
+  int i;
+
+  for (i = 0; i < AGENT_CONSENT_TRANSACTION_COUNT; i++) {
+    if (memcmp(agent->consent_transaction_ids[i], transaction_id,
+               sizeof(agent->consent_transaction_ids[i])) == 0) {
+      memset(agent->consent_transaction_ids[i], 0,
+             sizeof(agent->consent_transaction_ids[i]));
+      return 1;
+    }
+  }
+  return 0;
+}
+
 static const char* agent_candidate_type_name(IceCandidateType type) {
   switch (type) {
     case ICE_CANDIDATE_TYPE_HOST:
@@ -231,7 +255,11 @@ void agent_clear_candidates(Agent* agent) {
   agent->nominated_pair = NULL;
   agent->consent_last_received_ms = 0;
   agent->consent_last_send_ms = 0;
-  memset(agent->consent_transaction_id, 0, sizeof(agent->consent_transaction_id));
+  memset(agent->consent_transaction_ids, 0,
+         sizeof(agent->consent_transaction_ids));
+  agent->consent_requests_sent = 0;
+  agent->consent_responses_received = 0;
+  agent->consent_transaction_next = 0;
   memset(&agent->turn, 0, sizeof(agent->turn));
   memset(&agent->nat_pmp, 0, sizeof(agent->nat_pmp));
 }
@@ -891,13 +919,10 @@ static void agent_create_binding_request(Agent* agent, StunMessage* msg, int con
   // send binding request
   stun_msg_create(msg, STUN_CLASS_REQUEST | STUN_METHOD_BINDING);
   header = (StunHeader*)msg->buf;
-  if (consent) {
-    memcpy(agent->consent_transaction_id, header->transaction_id,
-           sizeof(agent->consent_transaction_id));
-  } else if (agent->nominated_pair->conncheck == 0) {
+  if (!consent && agent->nominated_pair->conncheck == 0) {
     memcpy(agent->conncheck_transaction_id, header->transaction_id,
            sizeof(agent->conncheck_transaction_id));
-  } else {
+  } else if (!consent) {
     memcpy(header->transaction_id, agent->conncheck_transaction_id,
            sizeof(header->transaction_id));
   }
@@ -937,7 +962,7 @@ void agent_process_stun_request(Agent* agent, StunMessage* stun_msg,
                addr_string, addr->port);
           break;
         }
-        LOGI("ICE accepted Binding Request from %s:%d",
+        LOGD("ICE accepted Binding Request from %s:%d",
              addr_string, addr->port);
         if (agent->selected_pair == NULL) {
           pair = agent_queue_triggered_check(agent, stun_msg, addr, via_turn);
@@ -980,9 +1005,9 @@ void agent_process_stun_response(Agent* agent, StunMessage* stun_msg, Address* a
       }
       if (agent->selected_pair != NULL &&
           addr_equal(addr, &agent->selected_pair->remote->addr) &&
-          memcmp(header->transaction_id, agent->consent_transaction_id,
-                 sizeof(header->transaction_id)) == 0) {
+          agent_take_consent_transaction(agent, header->transaction_id)) {
         agent->consent_last_received_ms = ports_get_epoch_time();
+        agent->consent_responses_received++;
         LOGD("ICE received consent response from %s:%d", received_addr, addr->port);
         break;
       }
@@ -1364,11 +1389,22 @@ int agent_consent_check(Agent* agent) {
                      addr_string, sizeof(addr_string));
       LOGW("ICE failed to send consent request to %s:%d",
            addr_string, agent->selected_pair->remote->addr.port);
+    } else {
+      agent_store_consent_transaction(
+          agent, ((StunHeader*)msg->buf)->transaction_id);
+      agent->consent_requests_sent++;
     }
     agent->consent_last_send_ms = now;
   }
 
-  return now - agent->consent_last_received_ms > CONFIG_KEEPALIVE_TIMEOUT ? -1 : 0;
+  if (now - agent->consent_last_received_ms > CONFIG_KEEPALIVE_TIMEOUT) {
+    LOGW("ICE consent timeout: idle=%u ms, requests=%u, responses=%u",
+         (unsigned int)(now - agent->consent_last_received_ms),
+         (unsigned int)agent->consent_requests_sent,
+         (unsigned int)agent->consent_responses_received);
+    return -1;
+  }
+  return 0;
 }
 
 int agent_select_candidate_pair(Agent* agent) {

@@ -24,6 +24,8 @@
 #define AGENT_MAX_CANDIDATE_PAIRS 100
 #endif
 
+#define AGENT_CONSENT_TRANSACTION_COUNT 6
+
 typedef enum AgentState {
 
   AGENT_STATE_GATHERING_ENDED = 0,
@@ -85,7 +87,10 @@ struct Agent {
   int b_host_addr;
   uint32_t consent_last_received_ms;
   uint32_t consent_last_send_ms;
-  uint32_t consent_transaction_id[3];
+  uint32_t consent_transaction_ids[AGENT_CONSENT_TRANSACTION_COUNT][3];
+  uint32_t consent_requests_sent;
+  uint32_t consent_responses_received;
+  uint8_t consent_transaction_next;
   AgentState state;
 
   AgentMode mode;

@@ -7,6 +7,9 @@
 
 #include "agent.h"
 
+void agent_process_stun_response(Agent* agent, StunMessage* stun_msg,
+                                 Address* addr);
+
 static void test_address(Address* address, const char* ip, uint16_t port) {
   memset(address, 0, sizeof(*address));
   assert(addr_from_string(ip, address) == 1);
@@ -137,10 +140,62 @@ static void test_equivalent_candidate_pairs(void) {
   assert(relay_pairs == 2);
 }
 
+static void test_delayed_consent_response(void) {
+  static const uint32_t delayed_transaction_id[3] = {1, 2, 3};
+  static const uint32_t current_transaction_id[3] = {4, 5, 6};
+  Agent agent = {0};
+  IceCandidatePair pair = {0};
+  StunMessage response;
+  StunHeader* header;
+  uint32_t received_ms;
+
+  test_create_candidate(&agent.local_candidates[0], 0,
+                        ICE_CANDIDATE_TYPE_HOST, "192.0.2.1", 5000,
+                        UINT16_MAX);
+  test_create_candidate(&agent.remote_candidates[0], 1,
+                        ICE_CANDIDATE_TYPE_SRFLX, "198.51.100.1", 6000,
+                        UINT16_MAX);
+  pair.local = &agent.local_candidates[0];
+  pair.remote = &agent.remote_candidates[0];
+  agent.selected_pair = &pair;
+  memcpy(agent.remote_upwd, "remote-password", sizeof("remote-password"));
+  memcpy(agent.consent_transaction_ids[0], delayed_transaction_id,
+         sizeof(delayed_transaction_id));
+  memcpy(agent.consent_transaction_ids[1], current_transaction_id,
+         sizeof(current_transaction_id));
+
+  stun_msg_create(&response, STUN_CLASS_RESPONSE | STUN_METHOD_BINDING);
+  header = (StunHeader*)response.buf;
+  memcpy(header->transaction_id, delayed_transaction_id,
+         sizeof(delayed_transaction_id));
+  assert(stun_msg_finish(&response, STUN_CREDENTIAL_SHORT_TERM,
+                         agent.remote_upwd,
+                         strlen(agent.remote_upwd)) == 0);
+  assert(stun_parse_msg_buf(&response) == 0);
+
+  agent_process_stun_response(&agent, &response,
+                              &agent.remote_candidates[0].addr);
+  assert(agent.consent_responses_received == 1);
+  assert(agent.consent_last_received_ms != 0);
+  assert(memcmp(agent.consent_transaction_ids[0],
+                delayed_transaction_id,
+                sizeof(delayed_transaction_id)) != 0);
+  assert(memcmp(agent.consent_transaction_ids[1],
+                current_transaction_id,
+                sizeof(current_transaction_id)) == 0);
+
+  received_ms = agent.consent_last_received_ms;
+  agent_process_stun_response(&agent, &response,
+                              &agent.remote_candidates[0].addr);
+  assert(agent.consent_responses_received == 1);
+  assert(agent.consent_last_received_ms == received_ms);
+}
+
 int main(void) {
   test_socket_fd_zero_is_closed();
   test_candidate_priority();
   test_remote_candidate_identity();
   test_equivalent_candidate_pairs();
+  test_delayed_consent_response();
   return 0;
 }
