@@ -6,6 +6,7 @@
 
 #include "agent.h"
 #include "base64.h"
+#include "edgertc_stats.h"
 #include "ice.h"
 #include "nat_pmp.h"
 #include "ports.h"
@@ -847,14 +848,21 @@ int agent_send(Agent* agent, const uint8_t* buf, int len) {
   IceCandidatePair* pair = agent->selected_pair != NULL
                                ? agent->selected_pair
                                : agent->nominated_pair;
+  int ret;
 
   if (pair == NULL) {
     return -1;
   }
   if (pair->local->type == ICE_CANDIDATE_TYPE_RELAY) {
-    return agent_turn_send(agent, &pair->remote->addr, buf, len);
+    EDGERTC_STATS_BEGIN(start);
+    ret = agent_turn_send(agent, &pair->remote->addr, buf, len);
+    EDGERTC_STATS_END(EDGERTC_STAT_AGENT_SEND_TURN, start);
+    return ret;
   }
-  return agent_socket_send(agent, &pair->remote->addr, buf, len);
+  EDGERTC_STATS_BEGIN(start);
+  ret = agent_socket_send(agent, &pair->remote->addr, buf, len);
+  EDGERTC_STATS_END(EDGERTC_STAT_AGENT_SEND_SOCKET, start);
+  return ret;
 }
 
 static void agent_create_binding_response(Agent* agent, StunMessage* msg, Address* addr) {

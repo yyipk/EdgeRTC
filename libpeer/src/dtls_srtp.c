@@ -6,6 +6,7 @@
 #include "address.h"
 #include "config.h"
 #include "dtls_srtp.h"
+#include "edgertc_stats.h"
 #if CONFIG_MBEDTLS_DEBUG
 #include "mbedtls/debug.h"
 #endif
@@ -660,23 +661,25 @@ void dtls_srtp_reset_session(DtlsSrtp* dtls_srtp) {
 int dtls_srtp_write(DtlsSrtp* dtls_srtp, const unsigned char* buf, size_t len) {
   int ret;
 
+  EDGERTC_STATS_BEGIN(start);
   do {
     ret = mbedtls_ssl_write(&dtls_srtp->ssl, buf, len);
 
   } while (ret == MBEDTLS_ERR_SSL_WANT_READ || ret == MBEDTLS_ERR_SSL_WANT_WRITE);
+  EDGERTC_STATS_END(EDGERTC_STAT_DTLS_WRITE, start);
   return ret;
 }
 
 int dtls_srtp_read(DtlsSrtp* dtls_srtp, unsigned char* buf, size_t len) {
   int ret;
 
-  memset(buf, 0, len);
-
+  EDGERTC_STATS_BEGIN(start);
   do {
     ret = mbedtls_ssl_read(&dtls_srtp->ssl, buf, len);
 
   } while (ret == MBEDTLS_ERR_SSL_WANT_READ || ret == MBEDTLS_ERR_SSL_WANT_WRITE);
 
+  EDGERTC_STATS_END(EDGERTC_STAT_DTLS_READ, start);
   return ret;
 }
 

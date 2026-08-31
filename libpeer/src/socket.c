@@ -2,6 +2,7 @@
 #include <string.h>
 #include <unistd.h>
 
+#include "edgertc_stats.h"
 #include "socket.h"
 #include "utils.h"
 
@@ -125,7 +126,10 @@ int udp_socket_sendto(UdpSocket* udp_socket, Address* addr, const uint8_t* buf, 
       break;
   }
 
-  if ((ret = sendto(udp_socket->fd, buf, len, 0, sa, sock_len)) < 0) {
+  EDGERTC_STATS_BEGIN(start);
+  ret = sendto(udp_socket->fd, buf, len, 0, sa, sock_len);
+  EDGERTC_STATS_END(EDGERTC_STAT_UDP_SEND, start);
+  if (ret < 0) {
     LOGD("Failed to sendto: %s", strerror(errno));
     return -1;
   }
@@ -159,7 +163,10 @@ int udp_socket_recvfrom(UdpSocket* udp_socket, Address* addr, uint8_t* buf, int 
       break;
   }
 
-  if ((ret = recvfrom(udp_socket->fd, buf, len, 0, sa, &sock_len)) < 0) {
+  EDGERTC_STATS_BEGIN(start);
+  ret = recvfrom(udp_socket->fd, buf, len, 0, sa, &sock_len);
+  EDGERTC_STATS_END(EDGERTC_STAT_UDP_RECV, start);
+  if (ret < 0) {
     LOGE("Failed to recvfrom: %s", strerror(errno));
     return -1;
   }

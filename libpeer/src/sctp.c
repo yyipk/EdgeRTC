@@ -2,6 +2,7 @@
 #include <string.h>
 
 #include "dtls_srtp.h"
+#include "edgertc_stats.h"
 #include "ports.h"
 #include "sctp.h"
 #include "utils.h"
@@ -562,8 +563,10 @@ static int sctp_outgoing_data_internal(Sctp* sctp, uint8_t* buf, size_t len,
 int sctp_outgoing_data(Sctp* sctp, char* buf, size_t len,
                        SctpDataPpid ppid, uint16_t sid,
                        SctpDataMode mode, size_t headroom, size_t tailroom) {
+  int ret;
+
+  EDGERTC_STATS_BEGIN(start);
 #if CONFIG_USE_USRSCTP
-  int res;
   struct sctp_sendv_spa spa = {0};
 
   (void)mode;
@@ -576,17 +579,18 @@ int sctp_outgoing_data(Sctp* sctp, char* buf, size_t len,
   spa.sendv_sndinfo.snd_flags = SCTP_EOR;
   spa.sendv_sndinfo.snd_ppid = htonl(ppid);
 
-  res = usrsctp_sendv(sctp->sock, buf, len, NULL, 0, &spa, sizeof(spa), SCTP_SENDV_SPA, 0);
-  if (res < 0) {
+  ret = usrsctp_sendv(sctp->sock, buf, len, NULL, 0, &spa, sizeof(spa), SCTP_SENDV_SPA, 0);
+  if (ret < 0) {
     LOGE("sctp sendv error %d: %s", errno, strerror(errno));
   }
-  return res;
 #else
-  return sctp_outgoing_data_internal(sctp, (uint8_t*)buf, len,
-                                     headroom, tailroom,
-                                     ppid, sid,
-                                     mode == SCTP_DATA_ZERO_COPY);
+  ret = sctp_outgoing_data_internal(sctp, (uint8_t*)buf, len,
+                                    headroom, tailroom,
+                                    ppid, sid,
+                                    mode == SCTP_DATA_ZERO_COPY);
 #endif
+  EDGERTC_STATS_END(EDGERTC_STAT_SCTP_SEND, start);
+  return ret;
 }
 
 void sctp_add_stream_mapping(Sctp* sctp, const char* label, uint16_t sid,

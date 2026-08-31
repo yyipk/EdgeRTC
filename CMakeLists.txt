@@ -2,6 +2,12 @@ set(CMAKE_INTERPROCEDURAL_OPTIMIZATION TRUE)
 set(CMAKE_AR "${CMAKE_C_COMPILER_AR}")
 set(EDGERTC_ACCEL_DIR ${CMAKE_CURRENT_LIST_DIR}/alg/accel)
 
+sdk_add_include_directories(stats/include)
+if(CONFIG_EDGERTC_STATS)
+    sdk_generate_library(edgertc)
+    sdk_library_add_sources(stats/edgertc_stats.c)
+endif()
+
 add_library(edgertc_compile_options INTERFACE)
 target_compile_options(edgertc_compile_options INTERFACE -O2)
 

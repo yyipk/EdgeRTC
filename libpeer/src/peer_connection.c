@@ -7,6 +7,7 @@
 #include "agent.h"
 #include "config.h"
 #include "dtls_srtp.h"
+#include "edgertc_stats.h"
 #include "peer_connection.h"
 #include "ports.h"
 #include "rtcp.h"
@@ -111,7 +112,9 @@ static void peer_connection_outgoing_rtp_packet(
   PeerConnection* pc = (PeerConnection*)user_data;
 
   (void)metadata;
+  EDGERTC_STATS_BEGIN(start);
   dtls_srtp_encrypt_rtp_packet(&pc->dtls_srtp, data, (int*)&size);
+  EDGERTC_STATS_END(EDGERTC_STAT_SRTP_ENCRYPT, start);
   agent_send(&pc->agent, data, size);
 }
 
@@ -147,9 +150,13 @@ static int peer_connection_dtls_srtp_recv(void* ctx, unsigned char* buf, size_t 
 static int peer_connection_dtls_srtp_send(void* ctx, const uint8_t* buf, size_t len) {
   DtlsSrtp* dtls_srtp = (DtlsSrtp*)ctx;
   PeerConnection* pc = (PeerConnection*)dtls_srtp->user_data;
+  int ret;
 
   // LOGD("send %.4x %.4x, %ld", *(uint16_t*)buf, *(uint16_t*)(buf + 2), len);
-  return agent_send(&pc->agent, buf, len);
+  EDGERTC_STATS_BEGIN(start);
+  ret = agent_send(&pc->agent, buf, len);
+  EDGERTC_STATS_END(EDGERTC_STAT_DTLS_SEND_CALLBACK, start);
+  return ret;
 }
 
 static void peer_connection_incoming_rtcp(PeerConnection* pc, uint8_t* buf, size_t len) {
@@ -420,31 +427,52 @@ int peer_connection_loop(PeerConnection* pc) {
 
           if (rtcp_probe(pc->agent_buf, pc->agent_ret)) {
             LOGD("Got RTCP packet");
+            EDGERTC_STATS_BEGIN(start);
             dtls_srtp_decrypt_rtcp_packet(&pc->dtls_srtp, pc->agent_buf, &pc->agent_ret);
+            EDGERTC_STATS_END(EDGERTC_STAT_SRTP_DECRYPT, start);
             peer_connection_incoming_rtcp(pc, pc->agent_buf, pc->agent_ret);
 
-          } else if (dtls_srtp_probe(pc->agent_buf)) {
-            int ret = dtls_srtp_read(&pc->dtls_srtp, pc->temp_buf, sizeof(pc->temp_buf));
-            LOGD("Got DTLS data %d", ret);
-
-            if (ret > 0) {
-              sctp_incoming_data(&pc->sctp, (char*)pc->temp_buf, ret);
-            }
-
-          } else if (rtp_packet_validate(pc->agent_buf, pc->agent_ret)) {
-            LOGD("Got RTP packet");
-
-            dtls_srtp_decrypt_rtp_packet(&pc->dtls_srtp, pc->agent_buf, &pc->agent_ret);
-
-            ssrc = rtp_get_ssrc(pc->agent_buf);
-            if (ssrc == pc->remote_assrc) {
-              rtp_decoder_decode(&pc->artp_decoder, pc->agent_buf, pc->agent_ret);
-            } else if (ssrc == pc->remote_vssrc) {
-              rtp_decoder_decode(&pc->vrtp_decoder, pc->agent_buf, pc->agent_ret);
-            }
-
           } else {
-            LOGW("Unknown data");
+            if (dtls_srtp_probe(pc->agent_buf)) {
+              int ret = dtls_srtp_read(&pc->dtls_srtp, pc->temp_buf,
+                                       sizeof(pc->temp_buf));
+              LOGD("Got DTLS data %d", ret);
+
+              if (ret > 0) {
+                EDGERTC_STATS_BEGIN(start);
+                sctp_incoming_data(&pc->sctp, (char*)pc->temp_buf, ret);
+                EDGERTC_STATS_END(EDGERTC_STAT_SCTP_RECV, start);
+              }
+
+            } else {
+              if (rtp_packet_validate(pc->agent_buf, pc->agent_ret)) {
+                LOGD("Got RTP packet");
+
+                EDGERTC_STATS_BEGIN(srtp_start);
+                dtls_srtp_decrypt_rtp_packet(&pc->dtls_srtp,
+                                             pc->agent_buf,
+                                             &pc->agent_ret);
+                EDGERTC_STATS_END(EDGERTC_STAT_SRTP_DECRYPT,
+                                  srtp_start);
+
+                ssrc = rtp_get_ssrc(pc->agent_buf);
+                if (ssrc == pc->remote_assrc) {
+                  EDGERTC_STATS_BEGIN(decode_start);
+                  rtp_decoder_decode(&pc->artp_decoder, pc->agent_buf,
+                                     pc->agent_ret);
+                  EDGERTC_STATS_END(EDGERTC_STAT_RTP_AUDIO_DECODE,
+                                    decode_start);
+                } else if (ssrc == pc->remote_vssrc) {
+                  EDGERTC_STATS_BEGIN(decode_start);
+                  rtp_decoder_decode(&pc->vrtp_decoder, pc->agent_buf,
+                                     pc->agent_ret);
+                  EDGERTC_STATS_END(EDGERTC_STAT_RTP_VIDEO_DECODE,
+                                    decode_start);
+                }
+              } else {
+                LOGW("Unknown data");
+              }
+            }
           }
         }
         if (!packet_consumed) {
