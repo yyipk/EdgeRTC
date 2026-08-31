@@ -42,8 +42,8 @@ struct PeerConnection {
   int b_local_description_created;
   int b_remote_answer_set;
 
-  RtpEncoder artp_encoder;
-  RtpEncoder vrtp_encoder;
+  RtpEncoder* artp_encoder;
+  RtpEncoder* vrtp_encoder;
   RtpDecoder vrtp_decoder;
   RtpDecoder artp_decoder;
 
@@ -246,7 +246,11 @@ PeerConnection* peer_connection_create(PeerConfiguration* config) {
 #endif
 
   if (pc->config.audio_codec) {
-    rtp_encoder_init(&pc->artp_encoder, pc->config.audio_codec,
+    pc->artp_encoder = calloc(1, sizeof(*pc->artp_encoder));
+    if (pc->artp_encoder == NULL) {
+      goto fail;
+    }
+    rtp_encoder_init(pc->artp_encoder, pc->config.audio_codec,
                      peer_connection_outgoing_rtp_packet, (void*)pc);
 
     rtp_decoder_init(&pc->artp_decoder, pc->config.audio_codec,
@@ -254,7 +258,11 @@ PeerConnection* peer_connection_create(PeerConfiguration* config) {
   }
 
   if (pc->config.video_codec) {
-    rtp_encoder_init(&pc->vrtp_encoder, pc->config.video_codec,
+    pc->vrtp_encoder = calloc(1, sizeof(*pc->vrtp_encoder));
+    if (pc->vrtp_encoder == NULL) {
+      goto fail;
+    }
+    rtp_encoder_init(pc->vrtp_encoder, pc->config.video_codec,
                      peer_connection_outgoing_rtp_packet, (void*)pc);
 
     rtp_decoder_init(&pc->vrtp_decoder, pc->config.video_codec,
@@ -262,12 +270,23 @@ PeerConnection* peer_connection_create(PeerConfiguration* config) {
   }
 
   return pc;
+
+fail:
+  rtp_decoder_deinit(&pc->artp_decoder);
+  rtp_decoder_deinit(&pc->vrtp_decoder);
+  free(pc->artp_encoder);
+  free(pc->vrtp_encoder);
+  agent_destroy(&pc->agent);
+  free(pc);
+  return NULL;
 }
 
 void peer_connection_destroy(PeerConnection* pc) {
   if (pc) {
     rtp_decoder_deinit(&pc->artp_decoder);
     rtp_decoder_deinit(&pc->vrtp_decoder);
+    free(pc->artp_encoder);
+    free(pc->vrtp_encoder);
     sctp_destroy_association(&pc->sctp);
     dtls_srtp_deinit(&pc->dtls_srtp);
     agent_destroy(&pc->agent);
@@ -281,19 +300,29 @@ void peer_connection_close(PeerConnection* pc) {
 }
 
 int peer_connection_send_audio(PeerConnection* pc, const uint8_t* buf, size_t len) {
-  if (pc->state != PEER_CONNECTION_COMPLETED) {
+  int ret;
+
+  if (pc->state != PEER_CONNECTION_COMPLETED || pc->artp_encoder == NULL) {
     // LOGE("dtls_srtp not connected");
     return -1;
   }
-  return rtp_encoder_encode(&pc->artp_encoder, buf, len);
+  EDGERTC_STATS_BEGIN(start);
+  ret = rtp_encoder_encode(pc->artp_encoder, buf, len);
+  EDGERTC_STATS_END(EDGERTC_STAT_RTP_SEND, start);
+  return ret;
 }
 
 int peer_connection_send_video(PeerConnection* pc, const uint8_t* buf, size_t len) {
-  if (pc->state != PEER_CONNECTION_COMPLETED) {
+  int ret;
+
+  if (pc->state != PEER_CONNECTION_COMPLETED || pc->vrtp_encoder == NULL) {
     // LOGE("dtls_srtp not connected");
     return -1;
   }
-  return rtp_encoder_encode(&pc->vrtp_encoder, buf, len);
+  EDGERTC_STATS_BEGIN(start);
+  ret = rtp_encoder_encode(pc->vrtp_encoder, buf, len);
+  EDGERTC_STATS_END(EDGERTC_STAT_RTP_SEND, start);
+  return ret;
 }
 
 int peer_connection_datachannel_send(PeerConnection* pc, char* message, size_t len) {

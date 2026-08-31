@@ -87,7 +87,6 @@ int peer_http_post(int secure,
   request.payload_len = strlen(body);
   request.optional_headers =
       optional_headers[0] != NULL ? optional_headers : NULL;
-  request.buffer_size = CONFIG_HTTP_BUFFER_SIZE;
 
   ret = https_client_request(&request, CONFIG_TLS_READ_TIMEOUT, &response);
   if (ret < 0 || response.overflow) {

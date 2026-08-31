@@ -55,7 +55,6 @@ typedef enum DevicePendingSdp {
 
 typedef struct PeerSignaling {
   PeerMqttContext mqtt_ctx;
-  uint8_t http_response[CONFIG_HTTP_BUFFER_SIZE];
 
   char subtopic[TOPIC_MAX_LEN];
   char pubtopic[TOPIC_MAX_LEN];
@@ -461,24 +460,32 @@ static int peer_signaling_http_post(const char* hostname,
                                     int port,
                                     const char* auth,
                                     const char* body) {
+  uint8_t* response;
   uint16_t status_code = 0;
   int ret;
 
+  response = malloc(CONFIG_HTTP_BUFFER_SIZE);
+  if (response == NULL) {
+    LOGE("Failed to allocate HTTP response buffer");
+    return -1;
+  }
   ret = peer_http_post(
       g_ps.http_secure, hostname, port, path, auth, body,
-      g_ps.http_response, sizeof(g_ps.http_response), &status_code);
+      response, CONFIG_HTTP_BUFFER_SIZE, &status_code);
   if (ret < 0) {
     LOGE("Failed to POST to %s:%d%s", hostname, port, path);
+    free(response);
     return ret;
   }
 
   LOGI("Received HTTP response from %s%s\n"
        "Response Status: %u\nResponse Body: %s\n",
-       hostname, path, status_code, g_ps.http_response);
+       hostname, path, status_code, response);
   if (status_code == 201) {
     peer_connection_set_remote_description(
-        g_ps.pc, (const char*)g_ps.http_response, SDP_TYPE_ANSWER);
+        g_ps.pc, (const char*)response, SDP_TYPE_ANSWER);
   }
+  free(response);
   return 0;
 }
 
