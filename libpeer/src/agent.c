@@ -948,7 +948,9 @@ void agent_process_stun_request(Agent* agent, StunMessage* stun_msg,
   size_t remote_ufrag_len = strlen(agent->remote_ufrag);
   StunMessage* msg = &agent->send_msg;
   StunHeader* header;
-  IceCandidatePair* pair;
+  IceCandidatePair* pair = NULL;
+  int migrate_selected_pair;
+  int send_ret;
   switch (stun_msg->stunmethod) {
     case STUN_METHOD_BINDING:
       addr_to_string(addr, addr_string, sizeof(addr_string));
@@ -963,7 +965,12 @@ void agent_process_stun_request(Agent* agent, StunMessage* stun_msg,
         }
         LOGD("ICE accepted Binding Request from %s:%d",
              addr_string, addr->port);
-        if (agent->selected_pair == NULL) {
+        migrate_selected_pair =
+            agent->selected_pair != NULL &&
+            agent->mode == AGENT_MODE_CONTROLLED &&
+            stun_msg->use_candidate &&
+            !addr_equal(addr, &agent->selected_pair->remote->addr);
+        if (agent->selected_pair == NULL || migrate_selected_pair) {
           pair = agent_queue_triggered_check(agent, stun_msg, addr, via_turn);
           if (pair != NULL && agent->mode == AGENT_MODE_CONTROLLED &&
               stun_msg->use_candidate) {
@@ -973,10 +980,15 @@ void agent_process_stun_request(Agent* agent, StunMessage* stun_msg,
         header = (StunHeader*)stun_msg->buf;
         memcpy(agent->transaction_id, header->transaction_id, sizeof(header->transaction_id));
         agent_create_binding_response(agent, msg, addr);
-        if ((via_turn
-                 ? agent_turn_send(agent, addr, msg->buf, msg->size)
-                 : agent_socket_send(agent, addr, msg->buf, msg->size)) < 0) {
+        send_ret = via_turn
+                       ? agent_turn_send(agent, addr, msg->buf, msg->size)
+                       : agent_socket_send(agent, addr, msg->buf, msg->size);
+        if (send_ret < 0) {
           LOGW("ICE failed to send Binding Response to %s:%d", addr_string, addr->port);
+        } else if (migrate_selected_pair && pair != NULL) {
+          pair->state = ICE_CANDIDATE_STATE_SUCCEEDED;
+          agent->nominated_pair = pair;
+          agent_select_succeeded_pair(agent, ports_get_epoch_time());
         }
         if (agent->selected_pair != NULL &&
             addr_equal(addr, &agent->selected_pair->remote->addr)) {

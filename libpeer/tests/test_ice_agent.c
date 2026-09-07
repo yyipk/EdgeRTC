@@ -9,6 +9,8 @@
 
 void agent_process_stun_response(Agent* agent, StunMessage* stun_msg,
                                  Address* addr);
+void agent_process_stun_request(Agent* agent, StunMessage* stun_msg,
+                                Address* addr, int via_turn);
 
 static void test_address(Address* address, const char* ip, uint16_t port) {
   memset(address, 0, sizeof(*address));
@@ -191,11 +193,74 @@ static void test_delayed_consent_response(void) {
   assert(agent.consent_last_received_ms == received_ms);
 }
 
+static void test_selected_pair_migration(void) {
+  Agent agent = {0};
+  IceCandidatePair* old_pair = &agent.candidate_pairs[0];
+  StunMessage request;
+  UdpSocket receiver = {.fd = -1};
+  Address new_remote;
+  uint32_t priority = htonl(1845501695);
+  uint64_t tie_breaker = 0;
+  char username[] = "local:remote";
+
+  agent.udp_sockets[0].fd = -1;
+  agent.udp_sockets[1].fd = -1;
+  assert(udp_socket_open(&agent.udp_sockets[0], AF_INET, 0) == 0);
+  assert(udp_socket_open(&receiver, AF_INET, 0) == 0);
+  test_address(&new_remote, "127.0.0.1", receiver.bind_addr.port);
+
+  agent.mode = AGENT_MODE_CONTROLLED;
+  memcpy(agent.local_ufrag, "local", sizeof("local"));
+  memcpy(agent.remote_ufrag, "remote", sizeof("remote"));
+  memcpy(agent.local_upwd, "local-password", sizeof("local-password"));
+  test_create_candidate(&agent.local_candidates[0], 0,
+                        ICE_CANDIDATE_TYPE_HOST, "127.0.0.1", 5000,
+                        UINT16_MAX);
+  test_create_candidate(&agent.remote_candidates[0], 1,
+                        ICE_CANDIDATE_TYPE_PRFLX, "127.0.0.1", 5001,
+                        UINT16_MAX);
+  agent.local_candidates_count = 1;
+  agent.remote_candidates_count = 1;
+  old_pair->local = &agent.local_candidates[0];
+  old_pair->remote = &agent.remote_candidates[0];
+  old_pair->state = ICE_CANDIDATE_STATE_SUCCEEDED;
+  old_pair->nominated = 1;
+  agent.candidate_pairs_num = 1;
+  agent.selected_pair = old_pair;
+  agent.nominated_pair = old_pair;
+
+  stun_msg_create(&request, STUN_CLASS_REQUEST | STUN_METHOD_BINDING);
+  assert(stun_msg_write_attr(&request, STUN_ATTR_TYPE_USERNAME,
+                             strlen(username), username) == 0);
+  assert(stun_msg_write_attr(&request, STUN_ATTR_TYPE_PRIORITY,
+                             sizeof(priority), (char*)&priority) == 0);
+  assert(stun_msg_write_attr(&request, STUN_ATTR_TYPE_USE_CANDIDATE,
+                             0, NULL) == 0);
+  assert(stun_msg_write_attr(&request, STUN_ATTR_TYPE_ICE_CONTROLLING,
+                             sizeof(tie_breaker),
+                             (char*)&tie_breaker) == 0);
+  assert(stun_msg_finish(&request, STUN_CREDENTIAL_SHORT_TERM,
+                         agent.local_upwd, strlen(agent.local_upwd)) == 0);
+  assert(stun_parse_msg_buf(&request) == 0);
+
+  agent_process_stun_request(&agent, &request, &new_remote, 0);
+  assert(agent.remote_candidates_count == 2);
+  assert(agent.candidate_pairs_num == 2);
+  assert(agent.selected_pair != old_pair);
+  assert(agent.selected_pair->state == ICE_CANDIDATE_STATE_SUCCEEDED);
+  assert(agent.selected_pair->nominated == 1);
+  assert(addr_equal(&agent.selected_pair->remote->addr, &new_remote));
+
+  udp_socket_close(&receiver);
+  udp_socket_close(&agent.udp_sockets[0]);
+}
+
 int main(void) {
   test_socket_fd_zero_is_closed();
   test_candidate_priority();
   test_remote_candidate_identity();
   test_equivalent_candidate_pairs();
   test_delayed_consent_response();
+  test_selected_pair_migration();
   return 0;
 }
