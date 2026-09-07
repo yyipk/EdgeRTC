@@ -9,6 +9,8 @@
 static uint32_t test_now_ms;
 static uint32_t sent_tsns[16];
 static size_t sent_count;
+static uint32_t forwarded_tsn;
+static size_t forward_count;
 static int fail_next_send;
 
 int dtls_srtp_write(DtlsSrtp* dtls_srtp, const uint8_t* buf, size_t len) {
@@ -16,8 +18,18 @@ int dtls_srtp_write(DtlsSrtp* dtls_srtp, const uint8_t* buf, size_t len) {
   const SctpDataChunk* chunk = (const SctpDataChunk*)packet->chunks;
 
   (void)dtls_srtp;
-  assert(len >= sizeof(SctpHeader) + sizeof(SctpDataChunk));
+  assert(len >= sizeof(SctpHeader) + sizeof(SctpChunkCommon));
+  if (chunk->type == SCTP_FORWARD_TSN) {
+    const SctpForwardTsnChunk* forward =
+        (const SctpForwardTsnChunk*)packet->chunks;
+
+    assert(len == sizeof(SctpHeader) + sizeof(SctpForwardTsnChunk));
+    forwarded_tsn = ntohl(forward->new_cumulative_tsn);
+    forward_count++;
+    return (int)len;
+  }
   assert(chunk->type == SCTP_DATA);
+  assert(len >= sizeof(SctpHeader) + sizeof(SctpDataChunk));
   assert(sent_count < sizeof(sent_tsns) / sizeof(sent_tsns[0]));
   sent_tsns[sent_count++] = ntohl(chunk->tsn);
   if (fail_next_send) {
@@ -153,6 +165,37 @@ int main(void) {
   assert(sctp.sent_packets == NULL);
   assert(sctp.sent_packets_tail == NULL);
   assert(sctp.sent_packet_count == 0);
+
+  memset(&sctp, 0, sizeof(sctp));
+  sctp.dtls_srtp = &dtls_srtp;
+  sctp.local_port = 5000;
+  sctp.remote_port = 5000;
+  sctp.tsn = 2000;
+  sctp.last_sack_tsn = sctp.tsn - 1;
+  sctp.last_pr_tsn = sctp.tsn - 1;
+  sctp.peer_supports_forward_tsn = 1;
+  sctp.stream_count = 1;
+  sctp.stream_table[0].sid = 0;
+  sctp.stream_table[0].no_retransmit = 1;
+  test_now_ms = 5000;
+  assert(sctp_outgoing_data(&sctp, (char*)payload,
+                            TEST_PAYLOAD_MAX * 3, PPID_BINARY, 0,
+                            SCTP_DATA_COPY, 0, 0) == TEST_PAYLOAD_MAX * 3);
+  sack = make_sack(sack_storage, 2000, 2, 2);
+  sctp_handle_sack(&sctp, sack, ntohs(sack->common.length));
+  assert(sctp.forward_state == SCTP_FORWARD_STATE_GAP_WAIT);
+  test_now_ms += SCTP_GAP_WAIT_MS + 1;
+  sctp_process_timers(&sctp);
+  assert(forward_count == 1);
+  assert(forwarded_tsn == 2002);
+  assert(sctp.forward_state == SCTP_FORWARD_STATE_PENDING);
+  test_now_ms += SCTP_FORWARD_RETRY_MS;
+  sctp_process_timers(&sctp);
+  assert(forward_count == 2);
+  assert(sctp.forward_state == SCTP_FORWARD_STATE_PENDING);
+  sack = make_sack(sack_storage, forwarded_tsn, 0, 0);
+  sctp_handle_sack(&sctp, sack, ntohs(sack->common.length));
+  assert(sctp.forward_state == SCTP_FORWARD_STATE_IDLE);
 
   memset(&sctp, 0, sizeof(sctp));
   sctp.dtls_srtp = &dtls_srtp;

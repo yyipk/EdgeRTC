@@ -777,9 +777,17 @@ void sctp_process_timers(Sctp* sctp) {
 #if !CONFIG_USE_USRSCTP
   SctpSentPacket* packet;
   uint32_t now_ms;
+  uint32_t epoch_ms;
 
   if (sctp == NULL) {
     return;
+  }
+  epoch_ms = ports_get_epoch_time();
+  if (sctp->forward_state == SCTP_FORWARD_STATE_GAP_WAIT &&
+      epoch_ms - sctp->forward_state_since_ms >= SCTP_GAP_WAIT_MS) {
+    sctp_start_forward_tsn(sctp, epoch_ms, "gap-timeout");
+  } else if (sctp->forward_state == SCTP_FORWARD_STATE_PENDING) {
+    sctp_send_forward_tsn(sctp, epoch_ms, 0);
   }
   now_ms = ports_get_time_ms();
   if (now_ms - sctp->last_retransmit_check_ms <
