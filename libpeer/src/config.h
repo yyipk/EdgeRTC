@@ -74,6 +74,14 @@
 #define LOG_REDIRECT 0
 #endif
 
+#ifndef CONFIG_EDGERTC_SIGNALING_DEBUG
+#define CONFIG_EDGERTC_SIGNALING_DEBUG 0
+#endif
+
+#ifndef CONFIG_EDGERTC_SCTP_DEBUG
+#define CONFIG_EDGERTC_SCTP_DEBUG 0
+#endif
+
 // Disable MQTT and HTTP signaling
 // #define DISABLE_PEER_SIGNALING 1
 

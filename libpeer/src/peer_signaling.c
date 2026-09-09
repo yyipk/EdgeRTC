@@ -41,6 +41,13 @@
 #define DEVICE_MESSAGE_BUSY "busy"
 #define DEVICE_MESSAGE_HANGUP "hangup"
 
+#if CONFIG_EDGERTC_SIGNALING_DEBUG
+#define SIGNAL_DEBUG_LOG(fmt, ...) \
+  LOGI("signaling: " fmt, ##__VA_ARGS__)
+#else
+#define SIGNAL_DEBUG_LOG(fmt, ...)
+#endif
+
 #define RPC_ERROR_PARSE_ERROR "{\"code\":-32700,\"message\":\"Parse error\"}"
 #define RPC_ERROR_INVALID_REQUEST "{\"code\":-32600,\"message\":\"Invalid Request\"}"
 #define RPC_ERROR_METHOD_NOT_FOUND "{\"code\":-32601,\"message\":\"Method not found\"}"
@@ -444,6 +451,9 @@ static void peer_signaling_on_device_event(const char* msg, size_t size) {
     if (g_ps.direct_call_active &&
         strcmp(g_ps.direct_peer_id, from->valuestring) == 0 &&
         strcmp(g_ps.direct_session, session->valuestring) == 0) {
+      SIGNAL_DEBUG_LOG("hangup rx from=%s session=%s state=%s",
+                       from->valuestring, session->valuestring,
+                       peer_connection_state_to_string(state));
       LOGI("Call ended by %s", g_ps.direct_peer_id);
       peer_connection_close(g_ps.pc);
       peer_signaling_clear_direct_call();
@@ -750,6 +760,8 @@ int peer_signaling_hangup() {
     return -1;
   }
 
+  SIGNAL_DEBUG_LOG("hangup tx peer=%s session=%s",
+                   g_ps.direct_peer_id, g_ps.direct_session);
   ret = peer_signaling_publish_device_message(g_ps.direct_peer_id,
                                               g_ps.direct_session,
                                               DEVICE_MESSAGE_HANGUP, NULL);
