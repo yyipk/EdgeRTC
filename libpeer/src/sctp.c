@@ -10,6 +10,12 @@
 #include <usrsctp.h>
 #endif
 
+#if CONFIG_EDGERTC_SCTP_DEBUG
+#define SCTP_DIAG_LOG(fmt, ...) LOGI("sctp_diag: " fmt, ##__VA_ARGS__)
+#else
+#define SCTP_DIAG_LOG(fmt, ...)
+#endif
+
 static const uint32_t crc32c_table[4][256] = {
   {
     0x00000000L, 0xF26B8303L, 0xE13B70F7L, 0x1350F3F4L,
@@ -356,8 +362,12 @@ static SctpChunkParam* sctp_find_init_param(SctpInitChunk* init,
 
 static int sctp_outgoing_data_cb(void* userdata, void* buf, size_t len, uint8_t tos, uint8_t set_df) {
   Sctp* sctp = (Sctp*)userdata;
+  int ret = dtls_srtp_write(sctp->dtls_srtp, buf, len);
 
-  return dtls_srtp_write(sctp->dtls_srtp, buf, len) < 0 ? -1 : 0;
+#if CONFIG_EDGERTC_SCTP_DEBUG && !CONFIG_USE_USRSCTP
+  sctp->last_dtls_write_ret = ret;
+#endif
+  return ret < 0 ? -1 : 0;
 }
 
 #if !CONFIG_USE_USRSCTP
@@ -542,6 +552,12 @@ static int sctp_send_forward_tsn(Sctp* sctp, uint32_t now_ms, int force) {
   sctp->forward_state_since_ms = now_ms;
   sctp->forward_attempts++;
   ret = sctp_outgoing_data_cb(sctp, packet, packet_length, 0, 0);
+  if (sctp->forward_attempts == 1 || sctp->forward_attempts == 30) {
+    SCTP_DIAG_LOG("forward send tsn=%lu attempt=%lu ret=%d dtls_ret=%d",
+                  (unsigned long)sctp->last_pr_tsn,
+                  (unsigned long)sctp->forward_attempts, ret,
+                  sctp->last_dtls_write_ret);
+  }
   if (sctp->forward_attempts == 1 ||
       (sctp->forward_attempts % 10U) == 0) {
     LOGD("SCTP forward tsn=%lu attempt=%lu ret=%d",
@@ -559,6 +575,11 @@ static void sctp_start_forward_tsn(Sctp* sctp, uint32_t now_ms,
   sctp->forward_state = SCTP_FORWARD_STATE_PENDING;
   sctp->forward_state_since_ms = 0;
   sctp->forward_attempts = 0;
+  SCTP_DIAG_LOG("pending start reason=%s tx_tsn=%lu ack_tsn=%lu last_pr_tsn=%lu dtls_ret=%d",
+                reason, (unsigned long)(sctp->tsn - 1),
+                (unsigned long)sctp->last_sack_tsn,
+                (unsigned long)sctp->last_pr_tsn,
+                sctp->last_dtls_write_ret);
   LOGD("SCTP forward start reason=%s last_pr_tsn=%lu",
        reason, (unsigned long)sctp->last_pr_tsn);
   sctp_send_forward_tsn(sctp, now_ms, 1);
@@ -603,6 +624,10 @@ static void sctp_handle_sack(Sctp* sctp, SctpSackChunk* sack,
   cumulative_tsn_ack = ntohl(sack->cumulative_tsn_ack);
   now_ms = ports_get_epoch_time();
   retransmit_now_ms = ports_get_time_ms();
+#if CONFIG_EDGERTC_SCTP_DEBUG
+  sctp->debug_last_sack_ms = now_ms;
+  sctp->debug_peer_rwnd = ntohl(sack->a_rwnd);
+#endif
   sctp->sack_count++;
   if ((sctp->sack_count % 500U) == 0) {
     LOGD("SCTP progress tx_tsn=%lu ack_tsn=%lu gaps=%u forward=%u",
@@ -617,6 +642,10 @@ static void sctp_handle_sack(Sctp* sctp, SctpSackChunk* sack,
 
   if (sctp->forward_state == SCTP_FORWARD_STATE_PENDING) {
     if (sctp_tsn_gte(cumulative_tsn_ack, sctp->last_pr_tsn)) {
+      SCTP_DIAG_LOG("pending cleared ack_tsn=%lu last_pr_tsn=%lu attempts=%lu",
+                    (unsigned long)cumulative_tsn_ack,
+                    (unsigned long)sctp->last_pr_tsn,
+                    (unsigned long)sctp->forward_attempts);
       LOGD("SCTP forward acknowledged ack_tsn=%lu attempts=%lu",
            (unsigned long)cumulative_tsn_ack,
            (unsigned long)sctp->forward_attempts);
@@ -789,6 +818,24 @@ void sctp_process_timers(Sctp* sctp) {
     return;
   }
   epoch_ms = ports_get_epoch_time();
+#if CONFIG_EDGERTC_SCTP_DEBUG
+  if (epoch_ms - sctp->debug_last_status_ms >= 10000U) {
+    uint32_t sack_age_ms = sctp->debug_last_sack_ms == 0 ? UINT32_MAX :
+                           epoch_ms - sctp->debug_last_sack_ms;
+
+    SCTP_DIAG_LOG("status connected=%d tx_tsn=%lu ack_tsn=%lu rwnd=%lu sacks=%lu forward=%u pr_tsn=%lu attempts=%lu dtls_ret=%d sack_age_ms=%lu",
+                  sctp->connected, (unsigned long)(sctp->tsn - 1),
+                  (unsigned long)sctp->last_sack_tsn,
+                  (unsigned long)sctp->debug_peer_rwnd,
+                  (unsigned long)sctp->sack_count,
+                  (unsigned int)sctp->forward_state,
+                  (unsigned long)sctp->last_pr_tsn,
+                  (unsigned long)sctp->forward_attempts,
+                  sctp->last_dtls_write_ret,
+                  (unsigned long)sack_age_ms);
+    sctp->debug_last_status_ms = epoch_ms;
+  }
+#endif
   if (sctp->forward_state == SCTP_FORWARD_STATE_GAP_WAIT &&
       epoch_ms - sctp->forward_state_since_ms >= SCTP_GAP_WAIT_MS) {
     sctp_start_forward_tsn(sctp, epoch_ms, "gap-timeout");
@@ -1140,12 +1187,29 @@ void sctp_incoming_data(Sctp* sctp, char* buf, size_t len) {
       case SCTP_HEARTBEAT_ACK:
         LOGD("SCTP_HEARTBEAT_ACK");
         break;
-      case SCTP_ABORT:
+      case SCTP_ABORT: {
+        uint16_t cause_code = 0;
+        uint16_t cause_length = 0;
+
+        if (chunk_length >= sizeof(SctpChunkCommon) + 4U) {
+          memcpy(&cause_code, (uint8_t *)chunk_common + sizeof(SctpChunkCommon),
+                 sizeof(cause_code));
+          memcpy(&cause_length,
+                 (uint8_t *)chunk_common + sizeof(SctpChunkCommon) + 2U,
+                 sizeof(cause_length));
+          cause_code = ntohs(cause_code);
+          cause_length = ntohs(cause_length);
+        }
+        SCTP_DIAG_LOG("abort received connected=%d flags=%u chunk_len=%u cause=%u cause_len=%u",
+                      sctp->connected, (unsigned int)chunk_common->flags,
+                      (unsigned int)chunk_length, (unsigned int)cause_code,
+                      (unsigned int)cause_length);
         sctp->connected = 0;
         if (sctp->onclose) {
           sctp->onclose(sctp->userdata);
         }
         break;
+      }
       default:
         LOGI("Unknown chunk type %d", chunk_common->type);
         length = 0;

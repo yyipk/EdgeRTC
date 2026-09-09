@@ -192,6 +192,12 @@ typedef struct Sctp {
   uint32_t forward_attempts;
   uint8_t peer_supports_forward_tsn;
   uint8_t forward_state;
+#if CONFIG_EDGERTC_SCTP_DEBUG
+  uint32_t debug_last_status_ms;
+  uint32_t debug_last_sack_ms;
+  uint32_t debug_peer_rwnd;
+  int last_dtls_write_ret;
+#endif
 #endif
 } Sctp;
 
