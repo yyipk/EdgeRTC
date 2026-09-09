@@ -201,6 +201,27 @@ int main(void) {
   sctp.dtls_srtp = &dtls_srtp;
   sctp.local_port = 5000;
   sctp.remote_port = 5000;
+  sctp.tsn = 3000;
+  sctp.last_pr_tsn = sctp.tsn - 1;
+  sctp.peer_supports_forward_tsn = 1;
+  sctp.stream_count = 1;
+  sctp.stream_table[0].sid = 0;
+  sctp.stream_table[0].no_retransmit = 1;
+  fail_next_send = 1;
+  forward_count = 0;
+  assert(sctp_outgoing_data(&sctp, (char*)payload,
+                            TEST_PAYLOAD_MAX * 3, PPID_BINARY, 0,
+                            SCTP_DATA_COPY, 0, 0) < 0);
+  assert(sctp.tsn == 3003);
+  assert(sctp.last_pr_tsn == 3002);
+  assert(forward_count == 1);
+  assert(forwarded_tsn == 3002);
+  assert(sctp.forward_state == SCTP_FORWARD_STATE_PENDING);
+
+  memset(&sctp, 0, sizeof(sctp));
+  sctp.dtls_srtp = &dtls_srtp;
+  sctp.local_port = 5000;
+  sctp.remote_port = 5000;
   assert(sctp_outgoing_data(&sctp, (char*)payload, 1, PPID_BINARY, 0,
                             SCTP_DATA_COPY, 0, 0) == 1);
   assert(sctp.sent_packet_count == 0);

@@ -759,6 +759,12 @@ static int sctp_outgoing_data_internal(Sctp* sctp, uint8_t* buf, size_t len,
     send_ret = sctp_outgoing_data_cb(sctp, packet, packet_len, 0, 0);
     if (send_ret < 0) {
       if (no_retransmit) {
+        size_t unsent_payload = remaining - payload_len;
+        size_t unsent_chunks =
+            (unsent_payload + payload_max - 1U) / payload_max;
+
+        sctp->tsn += (uint32_t)unsent_chunks;
+        sctp->last_pr_tsn = sctp->tsn - 1U;
         sctp_start_forward_tsn(sctp, ports_get_epoch_time(), "data-send");
       } else if (sent_packet != NULL) {
         LOGW("SCTP initial send failed tsn=%lu; queued for retransmission",
