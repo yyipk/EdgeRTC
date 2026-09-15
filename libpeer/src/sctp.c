@@ -856,18 +856,23 @@ void sctp_add_stream_mapping(Sctp* sctp, const char* label, uint16_t sid,
 static int sctp_store_data_channel_open(Sctp* sctp, uint16_t sid,
                                         char* data, size_t length) {
   uint32_t reliability_parameter;
+  uint16_t label_length;
+  uint16_t protocol_length;
 
   if (length < 12 || data[0] != DATA_CHANNEL_OPEN)
     return -1;
 
-  uint16_t label_length = ntohs(*(uint16_t*)(data + 8));
-  uint16_t protocol_length = ntohs(*(uint16_t*)(data + 10));
+  memcpy(&label_length, data + 8, sizeof(label_length));
+  memcpy(&protocol_length, data + 10, sizeof(protocol_length));
+  label_length = ntohs(label_length);
+  protocol_length = ntohs(protocol_length);
   if (length < 12 + label_length + protocol_length)
     return -1;
 
-  char label[label_length + 1];
-  memcpy(label, data + 12, label_length);
-  label[label_length] = '\0';
+  char label[sizeof(sctp->stream_table[0].label)];
+  size_t copied = label_length < sizeof(label) - 1U ? label_length : sizeof(label) - 1U;
+  memcpy(label, data + 12, copied);
+  label[copied] = '\0';
   printf("DATA_CHANNEL_OPEN: Label=%s, sid=%d\n", label, sid);
   memcpy(&reliability_parameter, data + 4, sizeof(reliability_parameter));
   sctp_add_stream_mapping(
