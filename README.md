@@ -38,7 +38,6 @@ needed by the target.
 ```text
 EdgeRTC/
 |-- libpeer/          WebRTC transport and signaling implementation
-|-- alg/audio/        Optional audio processing algorithms
 |-- cJSON/            JSON dependency
 |-- coreHTTP/         HTTP dependency
 |-- coreMQTT/         MQTT dependency
@@ -57,8 +56,8 @@ cmake --build build
 ```
 
 The repository root `CMakeLists.txt` is the embedded SDK component entry. It
-registers the enabled libpeer and audio algorithm targets and builds EdgeRTC
-targets with link-time optimization.
+registers the enabled libpeer targets and builds EdgeRTC targets with
+link-time optimization.
 
 ## Upstream and licenses
 

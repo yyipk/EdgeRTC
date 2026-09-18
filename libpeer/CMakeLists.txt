@@ -25,6 +25,9 @@ if(COMMAND sdk_generate_library)
   sdk_generate_library()
 
   sdk_library_add_sources(
+    net_buf/buf.c
+    net_buf/buf_simple.c
+    net_buf/net_buf_port_freertos.c
     src/address.c
     src/agent.c
     src/base64.c
@@ -49,6 +52,9 @@ if(COMMAND sdk_generate_library)
   )
 
   sdk_add_include_directories(src)
+  sdk_add_private_include_directories(net_buf/include)
+
+  add_subdirectory(src/jitter_buffer)
   if(NOT CONFIG_LIBPEER_USE_EXTERNAL_TRANSPORT)
     sdk_add_include_directories(${HTTP_INCLUDE_PUBLIC_DIRS})
     sdk_add_include_directories(${MQTT_INCLUDE_PUBLIC_DIRS})
