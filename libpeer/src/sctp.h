@@ -181,6 +181,8 @@ typedef struct Sctp {
 #if !CONFIG_USE_USRSCTP
   SctpSentPacket* sent_packets;
   SctpSentPacket* sent_packets_tail;
+  SctpSentPacket* sent_packets_free;
+  SctpSentPacket* sent_packet_pool;
   size_t sent_packet_count;
   size_t sent_packet_limit;
   uint32_t last_sack_tsn;

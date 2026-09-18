@@ -441,7 +441,10 @@ int peer_connection_loop(PeerConnection* pc) {
 
         if (pc->config.datachannel) {
           LOGI("SCTP create socket");
-          sctp_create_association(&pc->sctp, &pc->dtls_srtp);
+          if (sctp_create_association(&pc->sctp, &pc->dtls_srtp) < 0) {
+            STATE_CHANGED(pc, PEER_CONNECTION_FAILED);
+            break;
+          }
           pc->sctp.userdata = pc->config.user_data;
         }
 

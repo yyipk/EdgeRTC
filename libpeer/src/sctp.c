@@ -324,7 +324,7 @@ struct SctpSentPacket {
   uint32_t tsn;
   uint32_t last_send_ms;
   uint32_t resend_count;
-  uint8_t data[];
+  uint8_t data[SCTP_MTU];
 };
 
 enum {
@@ -396,23 +396,48 @@ static int sctp_sent_cache_has_space(Sctp* sctp, size_t len,
   return 1;
 }
 
-static SctpSentPacket* sctp_cache_sent_packet(Sctp* sctp, uint32_t tsn,
-                                              const uint8_t* data,
-                                              size_t length,
-                                              uint32_t now_ms) {
-  SctpSentPacket* packet = malloc(sizeof(*packet) + length);
+static int sctp_sent_cache_create(Sctp* sctp) {
+  size_t i;
 
-  if (packet == NULL) {
-    LOGE("SCTP send cache allocation failed length=%u",
-         (unsigned int)length);
-    return NULL;
+  if (sctp->sent_packet_limit == 0) {
+    return 0;
   }
+  sctp->sent_packet_pool = calloc(sctp->sent_packet_limit,
+                                  sizeof(*sctp->sent_packet_pool));
+  if (sctp->sent_packet_pool == NULL) {
+    LOGE("SCTP send cache allocation failed packets=%u",
+         (unsigned int)sctp->sent_packet_limit);
+    return -1;
+  }
+  for (i = 0; i < sctp->sent_packet_limit; i++) {
+    sctp->sent_packet_pool[i].next = sctp->sent_packets_free;
+    sctp->sent_packets_free = &sctp->sent_packet_pool[i];
+  }
+  return 0;
+}
+
+static SctpSentPacket* sctp_sent_cache_take(Sctp* sctp) {
+  SctpSentPacket* packet = sctp->sent_packets_free;
+
+  if (packet != NULL) {
+    sctp->sent_packets_free = packet->next;
+  }
+  return packet;
+}
+
+static void sctp_sent_cache_put(Sctp* sctp, SctpSentPacket* packet) {
+  packet->next = sctp->sent_packets_free;
+  sctp->sent_packets_free = packet;
+}
+
+static void sctp_cache_sent_packet(Sctp* sctp, SctpSentPacket* packet,
+                                   uint32_t tsn, size_t length,
+                                   uint32_t now_ms) {
   packet->next = NULL;
   packet->length = length;
   packet->tsn = tsn;
   packet->last_send_ms = now_ms;
   packet->resend_count = 0;
-  memcpy(packet->data, data, length);
   if (sctp->sent_packets_tail != NULL) {
     sctp->sent_packets_tail->next = packet;
   } else {
@@ -420,7 +445,6 @@ static SctpSentPacket* sctp_cache_sent_packet(Sctp* sctp, uint32_t tsn,
   }
   sctp->sent_packets_tail = packet;
   sctp->sent_packet_count++;
-  return packet;
 }
 
 static int sctp_retransmit_packet(Sctp* sctp, SctpSentPacket* packet,
@@ -509,7 +533,7 @@ static void sctp_handle_reliable_sack(Sctp* sctp, SctpSackChunk* sack,
         LOGI("SCTP retransmission acknowledged tsn=%lu retries=%u",
              (unsigned long)current->tsn, current->resend_count);
       }
-      free(current);
+      sctp_sent_cache_put(sctp, current);
       current = next;
       continue;
     }
@@ -711,7 +735,7 @@ static int sctp_outgoing_data_internal(Sctp* sctp, uint8_t* buf, size_t len,
       !sctp_sent_cache_has_space(sctp, len, payload_max)) {
     return -1;
   }
-  if (zero_copy) {
+  if (zero_copy && (no_retransmit || sctp->sent_packet_limit == 0)) {
     if (headroom < header_size ||
         (uintptr_t)buf < header_size ||
         (((uintptr_t)buf - header_size) & (sizeof(uint32_t) - 1)) != 0) {
@@ -735,7 +759,14 @@ static int sctp_outgoing_data_internal(Sctp* sctp, uint8_t* buf, size_t len,
     uint32_t packet_tsn;
 
     payload_len = remaining > payload_max ? payload_max : remaining;
-    if (zero_copy) {
+    if (!no_retransmit && sctp->sent_packet_limit > 0) {
+      sent_packet = sctp_sent_cache_take(sctp);
+      if (sent_packet == NULL) {
+        LOGE("SCTP send cache free list empty");
+        return -1;
+      }
+      packet = (SctpPacket*)sent_packet->data;
+    } else if (zero_copy) {
       packet = (SctpPacket*)(buf + pos - header_size);
     } else {
       packet = (SctpPacket*)sctp->buf;
@@ -765,7 +796,7 @@ static int sctp_outgoing_data_internal(Sctp* sctp, uint8_t* buf, size_t len,
     chunk->sqn = htons(message_sqn);
     chunk->ppid = htonl(ppid);
 
-    if (!zero_copy) {
+    if (sent_packet != NULL || !zero_copy) {
       memcpy(chunk->data, buf + pos, payload_len);
     }
     packet_len = header_size + payload_len;
@@ -777,13 +808,9 @@ static int sctp_outgoing_data_internal(Sctp* sctp, uint8_t* buf, size_t len,
     packet->header.checksum =
         sctp_get_checksum(sctp, (const uint8_t*)packet, packet_len);
 
-    if (!no_retransmit && sctp->sent_packet_limit > 0) {
-      sent_packet = sctp_cache_sent_packet(
-          sctp, packet_tsn, (const uint8_t*)packet, packet_len,
-          ports_get_time_ms());
-      if (sent_packet == NULL) {
-        return -1;
-      }
+    if (sent_packet != NULL) {
+      sctp_cache_sent_packet(sctp, sent_packet, packet_tsn, packet_len,
+                             ports_get_time_ms());
     }
     send_ret = sctp_outgoing_data_cb(sctp, packet, packet_len, 0, 0);
     if (send_ret < 0) {
@@ -1190,6 +1217,11 @@ void sctp_incoming_data(Sctp* sctp, char* buf, size_t len) {
       case SCTP_ABORT: {
         uint16_t cause_code = 0;
         uint16_t cause_length = 0;
+#if CONFIG_EDGERTC_SCTP_DEBUG
+        char cause_reason[33];
+        size_t cause_reason_len = 0;
+        cause_reason[0] = '\0';
+#endif
 
         if (chunk_length >= sizeof(SctpChunkCommon) + 4U) {
           memcpy(&cause_code, (uint8_t *)chunk_common + sizeof(SctpChunkCommon),
@@ -1199,11 +1231,33 @@ void sctp_incoming_data(Sctp* sctp, char* buf, size_t len) {
                  sizeof(cause_length));
           cause_code = ntohs(cause_code);
           cause_length = ntohs(cause_length);
+#if CONFIG_EDGERTC_SCTP_DEBUG
+          if (cause_length >= 4U &&
+              cause_length <= chunk_length - sizeof(SctpChunkCommon)) {
+            cause_reason_len = cause_length - 4U;
+            if (cause_reason_len > sizeof(cause_reason) - 1U) {
+              cause_reason_len = sizeof(cause_reason) - 1U;
+            }
+            memcpy(cause_reason,
+                   (uint8_t *)chunk_common + sizeof(SctpChunkCommon) + 4U,
+                   cause_reason_len);
+            for (size_t i = 0; i < cause_reason_len; i++) {
+              if (cause_reason[i] < 0x20 || cause_reason[i] > 0x7e) {
+                cause_reason[i] = '.';
+              }
+            }
+          }
+          cause_reason[cause_reason_len] = '\0';
+#endif
         }
         SCTP_DIAG_LOG("abort received connected=%d flags=%u chunk_len=%u cause=%u cause_len=%u",
                       sctp->connected, (unsigned int)chunk_common->flags,
                       (unsigned int)chunk_length, (unsigned int)cause_code,
                       (unsigned int)cause_length);
+#if CONFIG_EDGERTC_SCTP_DEBUG
+        SCTP_DIAG_LOG("abort reason: %s (len=%u)", cause_reason,
+                      (unsigned int)cause_reason_len);
+#endif
         sctp->connected = 0;
         if (sctp->onclose) {
           sctp->onclose(sctp->userdata);
@@ -1334,6 +1388,9 @@ int sctp_create_association(Sctp* sctp, DtlsSrtp* dtls_srtp) {
   sctp->remote_port = 5000;
   sctp->tsn = 1234;
 #if !CONFIG_USE_USRSCTP
+  if (sctp_sent_cache_create(sctp) < 0) {
+    return -1;
+  }
   sctp->last_sack_tsn = sctp->tsn - 1;
   sctp->last_retransmit_check_ms = 0;
   sctp->last_pr_tsn = sctp->tsn - 1;
@@ -1475,13 +1532,11 @@ int sctp_create_association(Sctp* sctp, DtlsSrtp* dtls_srtp) {
 void sctp_destroy_association(Sctp* sctp) {
 #if !CONFIG_USE_USRSCTP
   if (sctp != NULL) {
-    while (sctp->sent_packets != NULL) {
-      SctpSentPacket* packet = sctp->sent_packets;
-
-      sctp->sent_packets = packet->next;
-      free(packet);
-    }
+    free(sctp->sent_packet_pool);
+    sctp->sent_packet_pool = NULL;
     sctp->sent_packets_tail = NULL;
+    sctp->sent_packets = NULL;
+    sctp->sent_packets_free = NULL;
     sctp->sent_packet_count = 0;
   }
 #endif

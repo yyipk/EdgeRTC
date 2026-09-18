@@ -1,6 +1,5 @@
 set(CMAKE_INTERPROCEDURAL_OPTIMIZATION TRUE)
 set(CMAKE_AR "${CMAKE_C_COMPILER_AR}")
-set(EDGERTC_ACCEL_DIR ${CMAKE_CURRENT_LIST_DIR}/alg/accel)
 
 sdk_add_include_directories(stats/include)
 if(CONFIG_EDGERTC_STATS)
@@ -20,22 +19,9 @@ if(CONFIG_LIBPEER)
 endif()
 
 sdk_add_subdirectory_ifdef(CONFIG_LIBPEER libpeer)
-sdk_add_subdirectory_ifdef(CONFIG_LIBPEER alg/jitter_buffer)
-sdk_add_subdirectory_ifdef(CONFIG_ALIGENIE_AEC alg/audio/aligenieSDK_alg)
-sdk_add_subdirectory_ifdef(CONFIG_ALIGENIE_NS alg/audio/aligenie_ns)
-sdk_add_subdirectory_ifdef(CONFIG_AEC4 alg/audio/aec4)
-sdk_add_subdirectory_ifdef(CONFIG_RNNOISE_NS alg/audio/rnnoise)
-if(CONFIG_SPEEXDSP_ALG OR CONFIG_RNNOISE_NS)
-    add_subdirectory(alg/audio/speexdsp-1.2.1)
-endif()
 
-foreach(target liblibpeer libedgertc_jitter_buffer libaligenie_aec libaligenie_ns libaec4 librnnoise libspeexdsp)
+foreach(target liblibpeer libedgertc_jitter_buffer)
     if(TARGET ${target})
         target_link_libraries(${target} PRIVATE edgertc_compile_options)
     endif()
 endforeach()
-
-if(TARGET libspeexdsp AND CMAKE_C_COMPILER MATCHES "riscv")
-    target_sources(libspeexdsp PRIVATE
-                   alg/accel/e907/dsp_speex_fft_320.c)
-endif()

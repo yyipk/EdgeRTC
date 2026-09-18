@@ -90,6 +90,8 @@ int main(void) {
   sctp.tsn = 1234;
   sctp.sent_packet_limit = 3;
   sctp.last_sack_tsn = sctp.tsn - 1;
+  assert(sctp_sent_cache_create(&sctp) == 0);
+  assert(sctp.sent_packet_pool != NULL);
 
   test_now_ms = 1000;
   assert(sctp_outgoing_data(&sctp, (char*)payload, sizeof(payload),
@@ -114,8 +116,14 @@ int main(void) {
   assert(cached_packet_count(&sctp) == 0);
 
   test_now_ms = 2000;
+  SctpSentPacket* reused_packet = sctp.sent_packets_free;
+  payload[0] = 0x5a;
   assert(sctp_outgoing_data(&sctp, (char*)payload, 1, PPID_BINARY, 0,
-                            SCTP_DATA_COPY, 0, 0) == 1);
+                            SCTP_DATA_ZERO_COPY, 0, 0) == 1);
+  assert(sctp.sent_packets == reused_packet);
+  payload[0] = 0;
+  assert(reused_packet->data[sizeof(SctpPacket) +
+                             sizeof(SctpDataChunk)] == 0x5a);
   assert(sent_count == 5);
   sctp.last_retransmit_check_ms = test_now_ms;
   test_now_ms = 2150;

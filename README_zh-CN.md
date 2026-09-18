@@ -33,7 +33,6 @@ EdgeRTC 适用于摄像头、对讲设备、传感器、网关及其他需要 We
 ```text
 EdgeRTC/
 |-- libpeer/          WebRTC 传输和信令实现
-|-- alg/audio/        可选音频处理算法
 |-- cJSON/            JSON 依赖
 |-- coreHTTP/         HTTP 依赖
 |-- coreMQTT/         MQTT 依赖

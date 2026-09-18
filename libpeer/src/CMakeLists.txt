@@ -1,5 +1,7 @@
 project(lib)
 
+add_subdirectory(jitter_buffer)
+
 file(GLOB SRCS "*.c")
 list(FILTER SRCS EXCLUDE REGEX "/peer_(http|mqtt)_(core|external)\\.c$")
 list(APPEND SRCS ${PEER_SIGNALING_BACKEND_SOURCES})
