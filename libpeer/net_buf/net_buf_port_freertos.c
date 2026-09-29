@@ -23,10 +23,26 @@ static TickType_t timeout_to_ticks(k_timeout_t timeout)
 /* Sentinel entries keep GNU section boundaries available before any user pools exist. */
 static const struct net_buf_lifo_storage lifo_sentinel
 	__attribute__((section("libpeer_net_buf_lifos"), used, aligned(sizeof(void *))));
-static struct net_buf_pool pool_sentinel
-	__attribute__((section("libpeer_net_buf_pool"), used, aligned(sizeof(void *))));
 extern const struct net_buf_lifo_storage __start_libpeer_net_buf_lifos[];
 extern const struct net_buf_lifo_storage __stop_libpeer_net_buf_lifos[];
+
+struct net_buf_pool *libpeer_net_buf_pool_lookup(int id)
+{
+	configASSERT(id >= 0 && __start_libpeer_net_buf_lifos + id < __stop_libpeer_net_buf_lifos);
+	return (__start_libpeer_net_buf_lifos + id)->pool;
+}
+
+int libpeer_net_buf_pool_index(struct net_buf_pool *pool)
+{
+	for (const struct net_buf_lifo_storage *entry = __start_libpeer_net_buf_lifos;
+	     entry < __stop_libpeer_net_buf_lifos; entry++) {
+		if (entry->pool == pool) {
+			return entry - __start_libpeer_net_buf_lifos;
+		}
+	}
+	configASSERT(0);
+	return -1;
+}
 
 static void libpeer_net_buf_lifo_init(struct k_lifo *lifo, uint8_t *storage,
 				      UBaseType_t count, StaticQueue_t *control);
@@ -39,7 +55,7 @@ void libpeer_net_buf_init(void)
 	taskENTER_CRITICAL();
 	for (entry = __start_libpeer_net_buf_lifos;
 	     entry < __stop_libpeer_net_buf_lifos; entry++) {
-		if (entry->lifo && !entry->lifo->handle) {
+		if (entry->count && entry->lifo && !entry->lifo->handle) {
 			libpeer_net_buf_lifo_init(entry->lifo, entry->storage, entry->count,
 						  &entry->lifo->control);
 		}

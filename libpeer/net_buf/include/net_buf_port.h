@@ -100,7 +100,7 @@ typedef void *atomic_ptr_t;
 #ifndef __used
 #define __used __attribute__((used))
 #endif
-#define __in_section(a, b, c) __attribute__((section("libpeer_net_buf_pool"), used))
+#define __in_section(a, b, c) __attribute__((section(".data.libpeer_net_buf_pool"), used))
 
 #define __ASSERT(condition, ...) configASSERT(condition)
 #define __ASSERT_NO_MSG(condition) configASSERT(condition)
@@ -158,6 +158,7 @@ struct k_lifo {
 
 struct net_buf_lifo_storage {
 	struct k_lifo *lifo;
+	struct net_buf_pool *pool;
 	uint8_t *storage;
 	UBaseType_t count;
 };
@@ -168,18 +169,22 @@ struct net_buf_lifo_storage {
 	static void *name##_queue_storage[sizeof(_net_buf_##name) / sizeof(_net_buf_##name[0])]; \
 	static const struct net_buf_lifo_storage name##_queue_binding \
 		__attribute__((section("libpeer_net_buf_lifos"), used, aligned(sizeof(void *)))) = { \
-		&name.free, (uint8_t *)name##_queue_storage, \
+		&name.free, &name, (uint8_t *)name##_queue_storage, \
 		sizeof(name##_queue_storage) / sizeof(void *) }; \
-	static struct type name __attribute__((section("libpeer_net_buf_pool"), used, aligned(sizeof(void *))))
-#define STRUCT_SECTION_START_EXTERN(type) extern struct type __start_libpeer_net_buf_pool[]
-#define TYPE_SECTION_START(type) __start_libpeer_net_buf_pool
-#define STRUCT_SECTION_GET(type, index, result) (*(result) = &TYPE_SECTION_START(type)[index])
+	static struct type name __attribute__((section(".data.libpeer_net_buf_pool"), used, aligned(sizeof(void *))))
+#define STRUCT_SECTION_START_EXTERN(type)
+#define STRUCT_SECTION_GET(type, index, result) (*(result) = libpeer_net_buf_pool_lookup(index))
 #define Z_LIFO_INITIALIZER(object) { 0 }
 #define NET_BUF_POOL_ARENA_DEFINE(name) \
-	static struct net_buf_pool name \
-	__attribute__((section("libpeer_net_buf_pool"), used, aligned(sizeof(void *))))
+	static struct net_buf_pool name; \
+	static const struct net_buf_lifo_storage name##_queue_binding \
+		__attribute__((section("libpeer_net_buf_lifos"), used, aligned(sizeof(void *)))) = { \
+		&name.free, &name, NULL, 0 }; \
+	static struct net_buf_pool name __attribute__((section(".data.libpeer_net_buf_pool"), used, aligned(sizeof(void *))))
 
 void libpeer_net_buf_init(void);
+struct net_buf_pool *libpeer_net_buf_pool_lookup(int id);
+int libpeer_net_buf_pool_index(struct net_buf_pool *pool);
 int net_buf_pool_init(struct net_buf_pool *pool, void *arena, size_t arena_size,
 			      uint16_t count, uint16_t data_size,
 			      uint8_t user_data_size,
