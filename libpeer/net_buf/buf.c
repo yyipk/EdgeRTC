@@ -64,7 +64,7 @@ struct net_buf_pool *net_buf_pool_get(int id)
 
 static int pool_id(struct net_buf_pool *pool)
 {
-	return pool - TYPE_SECTION_START(net_buf_pool);
+	return libpeer_net_buf_pool_index(pool);
 }
 
 int net_buf_id(const struct net_buf *buf)

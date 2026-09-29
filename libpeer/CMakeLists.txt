@@ -52,7 +52,7 @@ if(COMMAND sdk_generate_library)
   )
 
   sdk_add_include_directories(src)
-  sdk_add_private_include_directories(net_buf/include)
+  sdk_add_include_directories(net_buf/include)
 
   add_subdirectory(src/jitter_buffer)
   if(NOT CONFIG_LIBPEER_USE_EXTERNAL_TRANSPORT)
