@@ -674,7 +674,8 @@ static const char* peer_connection_create_sdp(PeerConnection* pc, SdpType sdp_ty
   memset(pc->sdp, 0, sizeof(pc->sdp));
   if (sdp_type == SDP_TYPE_ANSWER && pc->remote_media_count > 0) {
     for (i = 0; i < pc->remote_media_count; ++i) {
-      if (peer_connection_media_enabled(pc, pc->remote_media[i].type)) {
+      if (pc->remote_media[i].type == SDP_MEDIA_AUDIO ||
+          peer_connection_media_enabled(pc, pc->remote_media[i].type)) {
         media[media_count++] = pc->remote_media[i];
       }
     }
@@ -716,6 +717,14 @@ static const char* peer_connection_create_sdp(PeerConnection* pc, SdpType sdp_ty
         break;
       case SDP_MEDIA_AUDIO:
         switch (pc->config.audio_codec) {
+          case CODEC_NONE:
+            sdp_append(pc->sdp, "m=audio 9 UDP/TLS/RTP/SAVPF 0");
+            sdp_append(pc->sdp, "c=IN IP4 0.0.0.0");
+            sdp_append(pc->sdp, "a=rtpmap:0 PCMU/8000");
+            sdp_append(pc->sdp, "a=inactive");
+            sdp_append(pc->sdp, "a=mid:%s", media[i].mid);
+            sdp_append(pc->sdp, "a=rtcp-mux");
+            break;
           case CODEC_PCMA:
             sdp_append_pcma(pc->sdp, media[i].mid);
             break;
