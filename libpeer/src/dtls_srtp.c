@@ -319,9 +319,9 @@ static void dtls_srtp_debug(void* ctx, int level, const char* file, int line, co
 int dtls_srtp_init(DtlsSrtp* dtls_srtp, DtlsSrtpRole role, void* user_data) {
   static const mbedtls_ssl_srtp_profile default_profiles[] = {
       MBEDTLS_TLS_SRTP_AES128_CM_HMAC_SHA1_80,
-      MBEDTLS_TLS_SRTP_AES128_CM_HMAC_SHA1_32,
-      MBEDTLS_TLS_SRTP_NULL_HMAC_SHA1_80,
-      MBEDTLS_TLS_SRTP_NULL_HMAC_SHA1_32,
+      //MBEDTLS_TLS_SRTP_AES128_CM_HMAC_SHA1_32,
+      //MBEDTLS_TLS_SRTP_NULL_HMAC_SHA1_80,
+      //MBEDTLS_TLS_SRTP_NULL_HMAC_SHA1_32,
       MBEDTLS_TLS_SRTP_UNSET};
 
   memset(dtls_srtp, 0, sizeof(*dtls_srtp));
