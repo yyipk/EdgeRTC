@@ -143,10 +143,10 @@ int edge_audio_jitter_push(struct edge_audio_jitter_buffer *jitter,
 
     distance = sequence_delta(sequence_number, jitter->expected_sequence);
     if (distance < 0) {
-        /* The playout clock may advance past a burst loss.  A packet that
-         * is already outside the whole reorder window can never be played,
-         * so restart from it instead of discarding the new RTP stream. */
-        if (distance <= -(int16_t)EDGE_AUDIO_JITTER_SLOT_COUNT) {
+        /* A recovered stream can stay slightly behind playout indefinitely;
+         * rebuffer after sustained concealment even within the reorder window. */
+        if (distance <= -(int16_t)EDGE_AUDIO_JITTER_SLOT_COUNT ||
+            jitter->consecutive_losses >= EDGE_AUDIO_JITTER_SLOT_COUNT) {
             jitter_initialize(jitter, sequence_number, ssrc);
         } else {
             return 0;
