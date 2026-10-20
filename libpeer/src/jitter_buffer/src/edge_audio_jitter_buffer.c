@@ -204,6 +204,12 @@ enum edge_audio_jitter_result edge_audio_jitter_get(
         return EDGE_AUDIO_JITTER_FRAME;
     }
 
+    if (jitter->consecutive_losses >= EDGE_AUDIO_JITTER_SLOT_COUNT) {
+        /* A stopped sender must not keep the speaker fed with comfort noise. */
+        edge_audio_jitter_reset(jitter);
+        return EDGE_AUDIO_JITTER_WAIT;
+    }
+
     if (!jitter->have_last_frame || jitter->consecutive_losses >= 3) {
         generate_comfort_noise(jitter, frame);
     } else if (jitter->consecutive_losses == 0) {
