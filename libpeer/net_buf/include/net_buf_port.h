@@ -53,7 +53,9 @@ typedef void *atomic_ptr_t;
 #define atomic_ptr_clear(target) __atomic_exchange_n((target), NULL, __ATOMIC_ACQ_REL)
 
 #define ARG_UNUSED(value) ((void)(value))
+#ifndef BIT
 #define BIT(bit) (1UL << (bit))
+#endif
 #define BUILD_ASSERT(condition, ...) _Static_assert(condition, #condition)
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
 #define MAX(a, b) ((a) > (b) ? (a) : (b))
@@ -88,7 +90,9 @@ typedef void *atomic_ptr_t;
 #define LOG_INF(...) LOG_DBG(__VA_ARGS__)
 #define k_current_get() xTaskGetCurrentTaskHandle()
 #define STRINGIFY_(value) #value
+#ifndef STRINGIFY
 #define STRINGIFY(value) STRINGIFY_(value)
+#endif
 
 #ifndef __aligned
 #define __aligned(value) __attribute__((aligned(value)))

@@ -186,6 +186,14 @@ void peer_connection_ondatachannel(PeerConnection* pc,
                                    void (*onopen)(void* userdata),
                                    void (*onclose)(void* userdata));
 
+/* Native SCTP: borrowed binary DATA chunks on unordered maxRetransmits=0 channels.
+ * Replaces onmessage for these chunks; data is valid only during the callback.
+ * flags retain SCTP B=0x02/E=0x01. Uses the connection's existing userdata.
+ * With usrsctp, complete messages continue to use onmessage. */
+void peer_connection_ondatachannelfragment(PeerConnection* pc,
+                                          void (*onfragment)(char* data, size_t size, void* userdata,
+                                                             uint16_t sid, uint32_t tsn, uint8_t flags));
+
 int peer_connection_lookup_sid(PeerConnection* pc, const char* label, uint16_t* sid);
 
 char* peer_connection_lookup_sid_label(PeerConnection* pc, uint16_t sid);

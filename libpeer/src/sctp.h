@@ -149,6 +149,9 @@ typedef enum SctpDataMode {
 #define SCTP_MAX_STREAMS 5
 
 #if !CONFIG_USE_USRSCTP
+#define SCTP_RECEIVE_TSN_WINDOW 256U
+#define SCTP_RECEIVE_WINDOW 65536U
+
 typedef struct SctpSentPacket SctpSentPacket;
 #endif
 
@@ -172,6 +175,8 @@ typedef struct Sctp {
 
   /* datachannel */
   void (*onmessage)(char* msg, size_t len, void* userdata, uint16_t sid);
+  void (*onfragment)(char* data, size_t size, void* userdata, uint16_t sid,
+                     uint32_t tsn, uint8_t flags);
   void (*onopen)(void* userdata);
   void (*onclose)(void* userdata);
 
@@ -194,6 +199,9 @@ typedef struct Sctp {
   uint32_t forward_attempts;
   uint8_t peer_supports_forward_tsn;
   uint8_t forward_state;
+  uint32_t recv_cumulative_tsn;
+  uint32_t recv_tsn_map[SCTP_RECEIVE_TSN_WINDOW / 32U];
+  uint8_t recv_initialized;
 #if CONFIG_EDGERTC_SCTP_DEBUG
   uint32_t debug_last_status_ms;
   uint32_t debug_last_sack_ms;
@@ -222,6 +230,9 @@ int sctp_outgoing_data(Sctp* sctp, char* buf, size_t len,
                        SctpDataMode mode, size_t headroom, size_t tailroom);
 
 void sctp_onmessage(Sctp* sctp, void (*onmessage)(char* msg, size_t len, void* userdata, uint16_t sid));
+void sctp_onfragment(Sctp* sctp,
+                     void (*onfragment)(char* data, size_t size, void* userdata,
+                                        uint16_t sid, uint32_t tsn, uint8_t flags));
 
 void sctp_onopen(Sctp* sctp, void (*onopen)(void* userdata));
 

@@ -801,6 +801,14 @@ void peer_connection_oniceconnectionstatechange(PeerConnection* pc,
   pc->oniceconnectionstatechange = oniceconnectionstatechange;
 }
 
+void peer_connection_ondatachannelfragment(PeerConnection* pc,
+                                          void (*onfragment)(char* data, size_t size, void* userdata,
+                                                             uint16_t sid, uint32_t tsn, uint8_t flags)) {
+  if (pc) {
+    sctp_onfragment(&pc->sctp, onfragment);
+  }
+}
+
 void peer_connection_ondatachannel(PeerConnection* pc,
                                    void (*onmessage)(char* msg, size_t len, void* userdata, uint16_t sid),
                                    void (*onopen)(void* userdata),
