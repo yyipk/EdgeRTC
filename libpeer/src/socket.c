@@ -132,7 +132,7 @@ int udp_socket_sendto(UdpSocket* udp_socket, Address* addr, const uint8_t* buf, 
   send_errno = ret < 0 ? errno : 0;
   EDGERTC_STATS_END(EDGERTC_STAT_UDP_SEND, start);
   if (ret < 0) {
-    LOGW("UDP send failed: fd=%d bytes=%d errno=%d (%s)",
+    LOGD("UDP send failed: fd=%d bytes=%d errno=%d (%s)",
          udp_socket->fd, len, send_errno, strerror(send_errno));
     errno = send_errno;
     return -1;

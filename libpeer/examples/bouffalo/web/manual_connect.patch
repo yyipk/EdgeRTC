@@ -1,0 +1,104 @@
+--- a/index.html
++++ b/index.html
+@@ -405,11 +405,9 @@
+         this.microphonePending = false;
+         this.state = 'offline';
+         this.runId = 0;
+-        this.retryAttempt = 0;
+         this.pc = undefined;
+         this.socket = undefined;
+         this.channel = undefined;
+-        this.retryTimer = undefined;
+         this.pendingFrame = undefined;
+         this.decoding = false;
+         this.videoGeneration = 0;
+@@ -455,7 +453,7 @@
+         } else if (busy) {
+           this.setState('busy', 'Busy', 'Another viewer is connected');
+         } else {
+-          this.start();
++          this.setState('idle', 'Ready', 'Click Connect to start the call');
+         }
+       }
+ 
+@@ -496,8 +494,8 @@
+         this.speakerOnIcon.hidden = !soundActive;
+         this.speakerOffIcon.hidden = soundActive;
+         this.leaveButton.hidden = !active;
+-        this.retryButton.hidden = !['busy', 'failed', 'left'].includes(this.state);
+-        this.retryButton.textContent = this.state === 'left' ? 'Connect' : 'Reconnect';
++        this.retryButton.hidden = !['idle', 'busy', 'failed', 'left'].includes(this.state);
++        this.retryButton.textContent = ['idle', 'left'].includes(this.state) ? 'Connect' : 'Reconnect';
+       }
+ 
+       stopMicrophone() {
+@@ -737,18 +735,17 @@
+         if (this.disposed) return;
+         this.userLeft = true;
+         leftDevices.add(this.deviceId);
+-        clearTimeout(this.retryTimer);
+-        this.retryTimer = undefined;
+         this.closeTransports(true);
+         this.setState('left', 'Left', 'Call ended');
+       }
+ 
+       updateBusy(busy) {
+         this.busy = busy;
+-        if (this.userLeft) return;
+-        if (!busy && this.state === 'busy') this.start();
+-        if (busy && !this.pc && !this.socket && !this.retryTimer) {
++        if (this.userLeft || this.pc || this.socket) return;
++        if (busy) {
+           this.setState('busy', 'Busy', 'Another viewer is connected');
++        } else if (this.state === 'busy') {
++          this.setState('idle', 'Ready', 'Click Connect to start the call');
+         }
+       }
+ 
+@@ -758,8 +755,6 @@
+           this.setState('busy', 'Busy', 'Another viewer is connected');
+           return;
+         }
+-        clearTimeout(this.retryTimer);
+-        this.retryTimer = undefined;
+         const runId = ++this.runId;
+         this.setRoute('Connecting');
+         this.setState('connecting', 'Connecting', 'Preparing WebRTC offer');
+@@ -783,7 +778,6 @@
+             if (this.pc !== connection) return;
+             const state = connection.iceConnectionState;
+             if (state === 'connected' || state === 'completed') {
+-              this.retryAttempt = 0;
+               this.startRouteDetection(connection);
+               this.startLatencyMonitoring(connection);
+               this.setState(
+@@ -795,7 +789,7 @@
+             } else if (state === 'failed' || state === 'closed') {
+               this.fail('WebRTC connection failed');
+             } else if (state === 'disconnected') {
+-              this.setState('connecting', 'Reconnecting', 'Network path interrupted');
++              this.fail('Network path interrupted; click Reconnect to retry');
+             }
+           };
+           connection.ontrack = event => {
+@@ -956,12 +950,6 @@
+         if (this.disposed) return;
+         this.closeTransports(false);
+         this.setState('failed', 'Unavailable', message);
+-        const delay = Math.min(30000, 2000 * (2 ** Math.min(this.retryAttempt, 4)));
+-        this.retryAttempt++;
+-        this.retryTimer = setTimeout(() => {
+-          this.retryTimer = undefined;
+-          this.start(true);
+-        }, delay);
+       }
+ 
+       closeTransports(sendHangup) {
+@@ -1020,7 +1008,6 @@
+ 
+       dispose() {
+         this.disposed = true;
+-        clearTimeout(this.retryTimer);
+         this.closeTransports(true);
+         this.element.remove();
+       }

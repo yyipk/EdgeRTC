@@ -53,6 +53,9 @@ cmake --build build
 仓库根目录的 `CMakeLists.txt` 是嵌入式 SDK 的组件入口，负责注册已启用的
 libpeer 和音频算法目标，并对 EdgeRTC 目标启用链接时优化。
 
+`libpeer/examples/bouffalo` 例程自行将本仓库源码接入构建，不启用 SDK 内置的
+`CONFIG_LIBPEER`。
+
 ## 上游与许可
 
 EdgeRTC 基于 [libpeer](https://github.com/sepfy/libpeer) 开发。相对上游基线的

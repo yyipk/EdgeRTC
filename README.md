@@ -59,6 +59,9 @@ The repository root `CMakeLists.txt` is the embedded SDK component entry. It
 registers the enabled libpeer targets and builds EdgeRTC targets with
 link-time optimization.
 
+The Bouffalo example in `libpeer/examples/bouffalo` adds this repository directly
+to its build and leaves the SDK's built-in `CONFIG_LIBPEER` disabled.
+
 ## Upstream and licenses
 
 EdgeRTC is based on [libpeer](https://github.com/sepfy/libpeer). Local changes

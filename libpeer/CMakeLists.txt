@@ -81,6 +81,7 @@ if(COMMAND sdk_generate_library)
     sdk_add_compile_definitions(-DHTTP_DO_NOT_USE_CUSTOM_CONFIG=1)
     sdk_add_compile_definitions(-DMQTT_DO_NOT_USE_CUSTOM_CONFIG=1)
   endif()
+  sdk_add_subdirectory_ifdef(CONFIG_EDGERTC_PLATFORM_BOUFFALO platform/bouffalo)
   return()
 endif()
 

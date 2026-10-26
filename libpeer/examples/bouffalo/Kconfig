@@ -1,0 +1,39 @@
+mainmenu "SDK Configuration"
+
+config PICOLIBC_TLS
+    default y if CHIP = "bl618dg" && CPU_ID = "ap" && CPU_MODEL = "b0"
+
+source "$BL_SDK_BASE/Kconfig"
+
+config EDGERTC_PLATFORM_BOUFFALO
+    bool "EdgeRTC Bouffalo platform"
+    depends on MEDIA_GRAPH
+    select LWIP
+    select MBEDTLS
+    select SRTP
+    select MBEDTLS_TLS_VERSION_1_2 if !MBEDTLS_V2
+    select MBEDTLS_DTLS if !MBEDTLS_V2
+    select MBEDTLS_X509_CRT_WRITE_C if !MBEDTLS_V2
+
+config LIBPEER_USE_EXTERNAL_TRANSPORT
+    bool "Use application WebRTC transport tasks"
+    depends on EDGERTC_PLATFORM_BOUFFALO
+    select MQTT
+    select HTTP
+    select HTTP_CLIENT
+
+config MBEDTLS_GCM_ALT
+    bool "Use hardware accelerated GCM"
+
+config AUDIO_CODEC_ES8388_ENABLE_ADC_ALC
+    bool "Enable ES8388 ADC automatic level control"
+
+config CODEC_USE_JY6316
+    bool "Use the external JY6316 codec"
+    depends on CODEC_USE_I2S && AUDIO_CODEC_JY6316_ENABLE
+
+config WEBRTC_VIDEO_RX
+    bool "Display browser JPEG video on the BL618DG LCD"
+    depends on BSP_LCD && LVGL9 && MG_VIDEO && CHIP = "bl618dg"
+    select MG_VIDEO_MJPEG_HW_DECODER
+    select LVGL9_OSD_LAYER
