@@ -81,7 +81,12 @@ typedef struct PeerConfiguration {
   MediaCodec audio_codec;
   MediaCodec video_codec;
   DataChannelType datachannel;
-  size_t sctp_send_cache_max_packets;  // 0 disables the retransmit cache
+  /* Native TX DATA descriptor limit. Zero selects the four-entry control-safe
+   * default; it does not disable reliable tracking or retransmission. */
+  size_t sctp_send_cache_max_packets;
+  /* Native RX owner-capacity budget. Zero selects 32 KiB; SDP advertises
+   * min(budget / 2, 16 KiB) as the maximum single message size. */
+  size_t sctp_receive_cache_max_bytes;
 
   void (*onaudiotrack)(uint8_t* data, size_t size,
                        const RtpPacketMetadata* metadata,
@@ -119,6 +124,9 @@ int peer_connection_create_datachannel_sid(PeerConnection* pc, DecpChannelType c
  * @param[in] peer connection
  * @param[in] message buffer
  * @param[in] length of message
+ * Native SCTP success means queued. Reliable messages may be transmitted by a
+ * later timer poll if the first DTLS write fails; the caller must not retry the
+ * same message after a non-negative return.
  */
 int peer_connection_datachannel_send(PeerConnection* pc, char* message, size_t len);
 
@@ -127,7 +135,10 @@ int peer_connection_datachannel_send(PeerConnection* pc, char* message, size_t l
  *
  * The SCTP layer does not copy the payload into its packet buffer. The message
  * buffer must provide writable space before and after the payload; its contents
- * are consumed and may be modified before this function returns.
+ * are consumed and may be modified before this function returns. Native SCTP
+ * uses this mode only for maxRetransmits=0 channels; reliable channels copy or
+ * retain an explicitly owned net_buf instead. The caller may release its frame
+ * immediately after this function returns.
  */
 int peer_connection_datachannel_send_inplace(PeerConnection* pc,
                                              uint8_t* message, size_t len,
@@ -135,6 +146,15 @@ int peer_connection_datachannel_send_inplace(PeerConnection* pc,
                                              size_t tailroom);
 
 int peer_connection_datachannel_send_sid(PeerConnection* pc, char* message, size_t len, uint16_t sid);
+
+struct net_buf;
+
+/* Native SCTP retains one reference to the immutable buffer until cumulative
+ * ACK or partial-reliability abandon, without a retransmission-cache copy. The
+ * caller may unref its reference after a successful call. Each wire packet is
+ * still copied into the contiguous DTLS packet scratch buffer. */
+int peer_connection_datachannel_send_buf(PeerConnection* pc, struct net_buf* message,
+                                         uint16_t sid);
 
 int peer_connection_send_audio(PeerConnection* pc, const uint8_t* packet, size_t bytes);
 
@@ -186,10 +206,12 @@ void peer_connection_ondatachannel(PeerConnection* pc,
                                    void (*onopen)(void* userdata),
                                    void (*onclose)(void* userdata));
 
-/* Native SCTP: borrowed binary DATA chunks on unordered maxRetransmits=0 channels.
- * Replaces onmessage for these chunks; data is valid only during the callback.
- * flags retain SCTP B=0x02/E=0x01. Uses the connection's existing userdata.
- * With usrsctp, complete messages continue to use onmessage. */
+/* Native SCTP callback for complete messages on unordered
+ * binary channels. A message is delivered as TSN-ordered, consecutive spans;
+ * B=0x02 marks the first span and E=0x01 the last. Each pointer is borrowed
+ * only for its callback and must not be retained by the application. This
+ * avoids the multi-fragment linearization copy required by onmessage. With
+ * usrsctp, complete messages continue to use onmessage. */
 void peer_connection_ondatachannelfragment(PeerConnection* pc,
                                           void (*onfragment)(char* data, size_t size, void* userdata,
                                                              uint16_t sid, uint32_t tsn, uint8_t flags));

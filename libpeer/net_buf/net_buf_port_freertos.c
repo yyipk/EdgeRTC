@@ -26,10 +26,42 @@ static const struct net_buf_lifo_storage lifo_sentinel
 extern const struct net_buf_lifo_storage __start_libpeer_net_buf_lifos[];
 extern const struct net_buf_lifo_storage __stop_libpeer_net_buf_lifos[];
 
+struct runtime_pool {
+	struct runtime_pool *next;
+	struct net_buf_pool *pool;
+	uint8_t id;
+};
+
+struct pool_arena {
+	struct net_buf_pool_fixed fixed;
+	struct net_buf_data_alloc alloc;
+	StaticQueue_t control;
+	struct runtime_pool registration;
+};
+
+static struct runtime_pool *runtime_pools;
+
 struct net_buf_pool *libpeer_net_buf_pool_lookup(int id)
 {
-	configASSERT(id >= 0 && __start_libpeer_net_buf_lifos + id < __stop_libpeer_net_buf_lifos);
-	return (__start_libpeer_net_buf_lifos + id)->pool;
+	struct net_buf_pool *pool = NULL;
+	ptrdiff_t static_count = __stop_libpeer_net_buf_lifos - __start_libpeer_net_buf_lifos;
+	unsigned int key;
+
+	if (id >= 0 && id < static_count) {
+		pool = __start_libpeer_net_buf_lifos[id].pool;
+		configASSERT(pool);
+		return pool;
+	}
+	key = libpeer_net_buf_irq_lock();
+	for (struct runtime_pool *entry = runtime_pools; entry; entry = entry->next) {
+		if (entry->id == id) {
+			pool = entry->pool;
+			break;
+		}
+	}
+	libpeer_net_buf_irq_unlock(key);
+	configASSERT(pool);
+	return pool;
 }
 
 int libpeer_net_buf_pool_index(struct net_buf_pool *pool)
@@ -40,6 +72,16 @@ int libpeer_net_buf_pool_index(struct net_buf_pool *pool)
 			return entry - __start_libpeer_net_buf_lifos;
 		}
 	}
+	unsigned int key = libpeer_net_buf_irq_lock();
+	for (struct runtime_pool *entry = runtime_pools; entry; entry = entry->next) {
+		if (entry->pool == pool) {
+			int id = entry->id;
+
+			libpeer_net_buf_irq_unlock(key);
+			return id;
+		}
+	}
+	libpeer_net_buf_irq_unlock(key);
 	configASSERT(0);
 	return -1;
 }
@@ -72,81 +114,92 @@ static void libpeer_net_buf_lifo_init(struct k_lifo *lifo, uint8_t *storage,
 	configASSERT(lifo->handle);
 }
 
-int net_buf_pool_init(struct net_buf_pool *pool, void *arena, size_t arena_size,
-			      uint16_t count, uint16_t data_size,
-			      uint8_t user_data_size,
-			      void (*destroy)(struct net_buf *buf))
+size_t net_buf_pool_arena_size(uint16_t count, uint16_t data_size, uint8_t user_data_size)
 {
-	struct net_buf_pool_fixed *fixed;
-	struct net_buf_data_alloc *alloc;
+	size_t struct_size = ROUND_UP(sizeof(struct net_buf) + user_data_size,
+				    __alignof__(struct net_buf));
+	size_t offset;
+
+	if (!count || !data_size) {
+		return 0;
+	}
+	offset = align_up(sizeof(struct pool_arena) + (size_t)count * sizeof(void *),
+			  __alignof__(struct net_buf));
+	if (count > (SIZE_MAX - offset) / struct_size) {
+		return 0;
+	}
+	offset = align_up(offset + struct_size * count, __alignof__(struct net_buf));
+	if (count > (SIZE_MAX - offset) / data_size) {
+		return 0;
+	}
+	return offset + (size_t)count * data_size;
+}
+
+int net_buf_pool_init(struct net_buf_pool *pool, void *arena, size_t arena_size,
+		      uint16_t count, uint16_t data_size,
+		      uint8_t user_data_size,
+		      void (*destroy)(struct net_buf *buf))
+{
+	struct pool_arena *storage = arena;
 	uint8_t *base = arena;
 	uint8_t *queue_storage;
 	uint8_t *buf_storage;
 	uint8_t *data_storage;
-	size_t offset = 0;
+	size_t offset;
 	size_t struct_size;
-	size_t descriptor_size;
-	size_t data_bytes;
-	StaticQueue_t *queue_control;
+	size_t required = net_buf_pool_arena_size(count, data_size, user_data_size);
+	int id = -1;
+	unsigned int key;
 
-	if (!pool || !arena || !count || !data_size) {
+	if (!pool || !arena || !required || (uintptr_t)arena % __alignof__(struct pool_arena)) {
 		return -EINVAL;
+	}
+	if (required > arena_size) {
+		return -ENOMEM;
+	}
+	if (pool->free.handle) {
+		return -EBUSY;
 	}
 
 	struct_size = ROUND_UP(sizeof(struct net_buf) + user_data_size,
 				      __alignof__(struct net_buf));
-	descriptor_size = struct_size * count;
-	data_bytes = (size_t)data_size * count;
-	if (struct_size == 0 || descriptor_size / struct_size != count ||
-	    data_bytes / data_size != count) {
-		return -EOVERFLOW;
-	}
-
-	offset = align_up(offset, __alignof__(struct net_buf_pool_fixed));
-	if (offset > arena_size || sizeof(*fixed) > arena_size - offset) {
-		return -ENOMEM;
-	}
-	fixed = (struct net_buf_pool_fixed *)(base + offset);
-	offset += sizeof(*fixed);
-
-	offset = align_up(offset, __alignof__(struct net_buf_data_alloc));
-	if (offset > arena_size || sizeof(*alloc) > arena_size - offset) {
-		return -ENOMEM;
-	}
-	alloc = (struct net_buf_data_alloc *)(base + offset);
-	offset += sizeof(*alloc);
-
-	offset = align_up(offset, __alignof__(StaticQueue_t));
-	if (offset > arena_size || sizeof(*queue_control) > arena_size - offset) {
-		return -ENOMEM;
-	}
-	queue_control = (StaticQueue_t *)(base + offset);
-	offset += sizeof(*queue_control);
-
-	offset = align_up(offset, sizeof(void *));
-	if (offset > arena_size || count > (arena_size - offset) / sizeof(void *)) {
-		return -ENOMEM;
-	}
+	offset = sizeof(*storage);
 	queue_storage = base + offset;
 	offset += (size_t)count * sizeof(void *);
 
 	offset = align_up(offset, __alignof__(struct net_buf));
-	if (offset > arena_size || descriptor_size > arena_size - offset) {
-		return -ENOMEM;
-	}
 	buf_storage = base + offset;
-	offset += descriptor_size;
+	offset += struct_size * count;
 
 	offset = align_up(offset, __alignof__(struct net_buf));
-	if (offset > arena_size || data_bytes > arena_size - offset) {
-		return -ENOMEM;
-	}
 	data_storage = base + offset;
 
-	fixed->data_pool = data_storage;
-	*alloc = (struct net_buf_data_alloc){
+	key = libpeer_net_buf_irq_lock();
+	for (const struct net_buf_lifo_storage *entry = __start_libpeer_net_buf_lifos;
+	     entry < __stop_libpeer_net_buf_lifos; entry++) {
+		if (entry->pool == pool) {
+			id = entry - __start_libpeer_net_buf_lifos;
+		}
+	}
+	if (id < 0) {
+		for (id = __stop_libpeer_net_buf_lifos - __start_libpeer_net_buf_lifos;
+		     id <= UINT8_MAX; id++) {
+			struct runtime_pool *entry;
+
+			for (entry = runtime_pools; entry && entry->id != id; entry = entry->next) {}
+			if (!entry) break;
+		}
+		if (id > UINT8_MAX) {
+			libpeer_net_buf_irq_unlock(key);
+			return -ENOSPC;
+		}
+		storage->registration = (struct runtime_pool){ runtime_pools, pool, id };
+		runtime_pools = &storage->registration;
+	}
+	storage->fixed.data_pool = data_storage;
+	storage->alloc = (struct net_buf_data_alloc){
 		.cb = &net_buf_fixed_cb,
-		.alloc_data = fixed,
+		.alloc_data = &storage->fixed,
 		.max_alloc_size = data_size,
 	};
 	struct net_buf_pool initialized = {
@@ -157,16 +210,46 @@ int net_buf_pool_init(struct net_buf_pool *pool, void *arena, size_t arena_size,
 		.user_data_size = user_data_size,
 #if defined(CONFIG_NET_BUF_POOL_USAGE)
 		.avail_count = ATOMIC_INIT(count),
-		.pool_size = data_bytes > UINT16_MAX ? UINT16_MAX : data_bytes,
+		.pool_size = MIN((size_t)data_size * count, UINT16_MAX),
 		.max_used = 0,
 		.name = NULL,
 #endif
 		.destroy = destroy,
-		.alloc = alloc,
+		.alloc = &storage->alloc,
 		.__bufs = (struct net_buf *)buf_storage,
 	};
 	memcpy(pool, &initialized, sizeof(initialized));
-	libpeer_net_buf_lifo_init(&pool->free, queue_storage, count, queue_control);
+	libpeer_net_buf_lifo_init(&pool->free, queue_storage, count, &storage->control);
+	libpeer_net_buf_irq_unlock(key);
+	return 0;
+}
+
+int net_buf_pool_deinit(struct net_buf_pool *pool)
+{
+	struct runtime_pool **link;
+	unsigned int key;
+
+	if (!pool) {
+		return -EINVAL;
+	}
+	key = libpeer_net_buf_irq_lock();
+	if (!pool->free.handle) {
+		libpeer_net_buf_irq_unlock(key);
+		return 0;
+	}
+	if (pool->uninit_count + uxQueueMessagesWaiting(pool->free.handle) != pool->buf_count) {
+		libpeer_net_buf_irq_unlock(key);
+		return -EBUSY;
+	}
+	for (link = &runtime_pools; *link; link = &(*link)->next) {
+		if ((*link)->pool == pool) {
+			*link = (*link)->next;
+			break;
+		}
+	}
+	vQueueDelete(pool->free.handle);
+	memset(pool, 0, sizeof(*pool));
+	libpeer_net_buf_irq_unlock(key);
 	return 0;
 }
 

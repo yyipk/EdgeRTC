@@ -189,10 +189,14 @@ struct net_buf_lifo_storage {
 void libpeer_net_buf_init(void);
 struct net_buf_pool *libpeer_net_buf_pool_lookup(int id);
 int libpeer_net_buf_pool_index(struct net_buf_pool *pool);
+/* Runtime pools must start zeroed; arena must be suitably aligned (e.g. malloc).
+ * Serialize init/deinit with pool users; deinit requires all buffers returned. */
+size_t net_buf_pool_arena_size(uint16_t count, uint16_t data_size, uint8_t user_data_size);
 int net_buf_pool_init(struct net_buf_pool *pool, void *arena, size_t arena_size,
-			      uint16_t count, uint16_t data_size,
-			      uint8_t user_data_size,
-			      void (*destroy)(struct net_buf *buf));
+		      uint16_t count, uint16_t data_size,
+		      uint8_t user_data_size,
+		      void (*destroy)(struct net_buf *buf));
+int net_buf_pool_deinit(struct net_buf_pool *pool);
 void libpeer_net_buf_lifo_put(struct k_lifo *lifo, void *data);
 void *libpeer_net_buf_lifo_get(struct k_lifo *lifo, k_timeout_t timeout);
 #define k_lifo_put(lifo, data) libpeer_net_buf_lifo_put(lifo, data)

@@ -141,8 +141,8 @@ typedef enum SctpDataPpid {
 
 typedef enum SctpDataMode {
 
-  SCTP_DATA_COPY,
-  SCTP_DATA_ZERO_COPY
+  SCTP_DATA_COPY,       /* Retain a private copy for any asynchronous retry. */
+  SCTP_DATA_ZERO_COPY   /* Use caller headroom; valid only for synchronous PR0. */
 
 } SctpDataMode;
 
@@ -150,15 +150,22 @@ typedef enum SctpDataMode {
 
 #if !CONFIG_USE_USRSCTP
 #define SCTP_RECEIVE_TSN_WINDOW 256U
-#define SCTP_RECEIVE_WINDOW 65536U
 
-typedef struct SctpSentPacket SctpSentPacket;
+typedef struct SctpTx SctpTx;
+typedef struct SctpRx SctpRx;
 #endif
 
+struct net_buf;
+struct net_buf_pool;
+
 typedef struct {
-  char label[32];  // Stream label
-  uint16_t sid;    // Stream ID
-  uint8_t no_retransmit;
+  char label[32];                    /* DCEP label, truncated to this storage. */
+  uint16_t sid;                      /* SCTP stream identifier. */
+  uint8_t no_retransmit;             /* Unordered maxRetransmits=0 RX expiry policy. */
+  uint8_t channel_type;              /* DCEP type; bit 7 is unordered. */
+  uint32_t reliability_parameter;    /* Retry count or lifetime in milliseconds. */
+  uint16_t send_sqn;                 /* Next SSN for locally ordered messages. */
+  uint16_t recv_sqn;                 /* Next SSN expected on this stream. */
 } SctpStreamEntry;
 
 typedef struct Sctp {
@@ -184,36 +191,28 @@ typedef struct Sctp {
   uint8_t buf[CONFIG_MTU];
 
 #if !CONFIG_USE_USRSCTP
-  SctpSentPacket* sent_packets;
-  SctpSentPacket* sent_packets_tail;
-  SctpSentPacket* sent_packets_free;
-  SctpSentPacket* sent_packet_pool;
-  size_t sent_packet_count;
-  size_t sent_packet_limit;
-  uint32_t last_sack_tsn;
-  uint32_t last_retransmit_check_ms;
-  uint32_t last_pr_tsn;
-  uint32_t gap_cumulative_tsn;
-  uint32_t forward_state_since_ms;
-  uint32_t sack_count;
-  uint32_t forward_attempts;
+  SctpTx* tx;                        /* Native TX ring and retained payload refs. */
+  SctpRx* rx;                        /* Native RX fragment list and cache usage. */
+  struct net_buf_pool* packets;      /* Fixed slots shared by this connection's TX/RX. */
+  size_t sent_packet_limit;          /* Maximum retained DATA descriptors. */
+  size_t recv_cache_limit;           /* Maximum owner capacity retained by RX. */
+  struct net_buf* handshake;          /* Immutable INIT or COOKIE_ECHO snapshot. */
+  uint32_t handshake_sent_ms;        /* Last handshake snapshot transmission. */
+  uint16_t handshake_timeout_ms;     /* Exponential retry delay, capped at 640 ms. */
+  uint32_t last_sack_tsn;            /* Highest cumulative TSN acknowledged by peer. */
   uint8_t peer_supports_forward_tsn;
-  uint8_t forward_state;
-  uint32_t recv_cumulative_tsn;
-  uint32_t recv_tsn_map[SCTP_RECEIVE_TSN_WINDOW / 32U];
-  uint8_t recv_initialized;
-#if CONFIG_EDGERTC_SCTP_DEBUG
-  uint32_t debug_last_status_ms;
-  uint32_t debug_last_sack_ms;
-  uint32_t debug_peer_rwnd;
-  int last_dtls_write_ret;
-#endif
+  uint32_t recv_cumulative_tsn;      /* Highest contiguous TSN accepted locally. */
+  uint32_t recv_tsn_map[SCTP_RECEIVE_TSN_WINDOW / 32U]; /* SACK gap bitmap. */
+  uint8_t recv_initialized;          /* Peer INIT established the receive baseline. */
 #endif
 } Sctp;
 
 int sctp_create_association(Sctp* sctp, DtlsSrtp* dtls_srtp);
 
 void sctp_destroy_association(Sctp* sctp);
+
+/* Final teardown after the peer loop has returned all borrowed packet refs. */
+void sctp_deinit(Sctp* sctp);
 
 void sctp_usrsctp_init();
 
@@ -223,13 +222,41 @@ int sctp_is_connected(Sctp* sctp);
 
 void sctp_incoming_data(Sctp* sctp, char* buf, size_t len);
 
+/* Borrow packet for synchronous parsing; queued receive fragments retain their
+ * own net_buf reference before the caller releases its reference. */
+void sctp_incoming_net_buf(Sctp* sctp, struct net_buf* packet);
+
+/* Allocate one fixed-pool net_buf reference with capacity up to CONFIG_MTU
+ * for DTLS plaintext, handshake snapshots, or outgoing owned messages. */
+#if !CONFIG_USE_USRSCTP
+struct net_buf* sctp_packet_alloc(Sctp* sctp, size_t size);
+#endif
+
+/* Return the native maximum message size advertised through SDP. */
+size_t sctp_receive_message_limit(const Sctp* sctp);
+
+/* Run native handshake, TX retransmission/FORWARD_TSN and RX expiry work. */
 void sctp_process_timers(Sctp* sctp);
 
+/* Queue one data-channel message. A non-negative native return means the
+ * complete message was admitted to the bounded TX ring, not that every DATA
+ * packet has already been acknowledged by the peer. */
 int sctp_outgoing_data(Sctp* sctp, char* buf, size_t len,
                        SctpDataPpid ppid, uint16_t sid,
                        SctpDataMode mode, size_t headroom, size_t tailroom);
 
+/* Native SCTP retains one reference to this contiguous immutable payload until
+ * cumulative ACK or partial-reliability abandon. The caller may unref its own
+ * reference after a successful call; the packetizer still copies each wire
+ * fragment into the contiguous DTLS packet scratch buffer. */
+int sctp_outgoing_net_buf(Sctp* sctp, struct net_buf* message,
+                          SctpDataPpid ppid, uint16_t sid);
+
+int sctp_configure_stream(Sctp* sctp, uint16_t sid, const char* label,
+                          uint8_t channel_type, uint32_t reliability_parameter);
+
 void sctp_onmessage(Sctp* sctp, void (*onmessage)(char* msg, size_t len, void* userdata, uint16_t sid));
+/* Register the borrowed-span callback used by complete unordered binary messages. */
 void sctp_onfragment(Sctp* sctp,
                      void (*onfragment)(char* data, size_t size, void* userdata,
                                         uint16_t sid, uint32_t tsn, uint8_t flags));

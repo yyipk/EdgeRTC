@@ -32,7 +32,8 @@ void sdp_append_pcmu(char* sdp, const char* mid);
 
 void sdp_append_opus(char* sdp, const char* mid);
 
-void sdp_append_datachannel(char* sdp, const char* mid);
+/* Advertise the native receiver's actual bounded message capacity. */
+void sdp_append_datachannel(char* sdp, const char* mid, size_t max_message_size);
 
 void sdp_create(char* sdp, const SdpMedia* media, size_t media_count);
 

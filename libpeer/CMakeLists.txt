@@ -42,6 +42,8 @@ if(COMMAND sdk_generate_library)
     src/rtcp.c
     src/rtp.c
     src/sctp.c
+    src/sctp_tx.c
+    src/sctp_rx.c
     src/sdp.c
     src/socket.c
     src/ssl_transport.c
@@ -109,6 +111,9 @@ option(UNDEFINED_BEHAVIOR_SANITIZER "Build with UndefinedBehaviorSanitizer." OFF
 
 include(ExternalProject)
 
+set(PEER_MBEDTLS_USER_CONFIG ${CMAKE_CURRENT_SOURCE_DIR}/examples/generic/mbedtls_user_config.h)
+add_compile_definitions(MBEDTLS_USER_CONFIG_FILE="${PEER_MBEDTLS_USER_CONFIG}")
+
 include_directories(${CMAKE_BINARY_DIR}/dist/include ${CMAKE_BINARY_DIR}/dist/include/cjson)
 
 link_directories(${CMAKE_BINARY_DIR}/dist/lib)
@@ -163,15 +168,12 @@ ExternalProject_Add(cjson
 ExternalProject_Add(mbedtls
   SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../mbedtls
   CMAKE_ARGS
-    -DCMAKE_C_FLAGS="-fPIC"
+    "-DCMAKE_C_FLAGS=-fPIC -DMBEDTLS_USER_CONFIG_FILE=\\\"${PEER_MBEDTLS_USER_CONFIG}\\\""
     -DENABLE_TESTING=off
     -DENABLE_PROGRAMS=off
     -DCMAKE_INSTALL_PREFIX=${CMAKE_BINARY_DIR}/dist
     -DCMAKE_TOOLCHAIN_FILE=${CMAKE_TOOLCHAIN_FILE}
 )
-file(READ ${CMAKE_CURRENT_SOURCE_DIR}/../mbedtls/include/mbedtls/mbedtls_config.h INPUT_CONTENT)
-string(REPLACE "//#define MBEDTLS_SSL_DTLS_SRTP" "#define MBEDTLS_SSL_DTLS_SRTP" MODIFIED_CONTENT ${INPUT_CONTENT})
-file(WRITE ${CMAKE_CURRENT_SOURCE_DIR}/../mbedtls/include/mbedtls/mbedtls_config.h ${MODIFIED_CONTENT})
 
 ExternalProject_Add(srtp2
   SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../libsrtp

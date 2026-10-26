@@ -1,3 +1,4 @@
+#include <errno.h>
 #include <inttypes.h>
 #include <mbedtls/net_sockets.h>
 #include <stdio.h>
@@ -13,6 +14,7 @@
 #include "rtcp.h"
 #include "rtp.h"
 #include "sctp.h"
+#include "sctp_native.h"
 #include "sdp.h"
 
 #define STATE_CHANGED(pc, curr_state)                                 \
@@ -121,6 +123,7 @@ static void peer_connection_outgoing_rtp_packet(
 static int peer_connection_dtls_srtp_recv(void* ctx, unsigned char* buf, size_t len) {
   int recv_max = 0;
   int ret = -1;
+  int recv_errno;
   DtlsSrtp* dtls_srtp = (DtlsSrtp*)ctx;
   PeerConnection* pc = (PeerConnection*)dtls_srtp->user_data;
 
@@ -130,12 +133,18 @@ static int peer_connection_dtls_srtp_recv(void* ctx, unsigned char* buf, size_t 
   }
 
   while (recv_max < CONFIG_TLS_READ_TIMEOUT && pc->state == PEER_CONNECTION_CONNECTED) {
+    errno = 0;
     ret = agent_recv(&pc->agent, buf, len, NULL);
+    recv_errno = ret < 0 ? errno : 0;
 
     if (ret > 0) {
       break;
     }
     if (ret < 0) {
+      if (recv_errno == EAGAIN || recv_errno == EWOULDBLOCK ||
+          recv_errno == EINTR) {
+        return MBEDTLS_ERR_SSL_WANT_READ;
+      }
       return MBEDTLS_ERR_NET_RECV_FAILED;
     }
 
@@ -151,11 +160,21 @@ static int peer_connection_dtls_srtp_send(void* ctx, const uint8_t* buf, size_t 
   DtlsSrtp* dtls_srtp = (DtlsSrtp*)ctx;
   PeerConnection* pc = (PeerConnection*)dtls_srtp->user_data;
   int ret;
+  int send_errno;
 
   // LOGD("send %.4x %.4x, %ld", *(uint16_t*)buf, *(uint16_t*)(buf + 2), len);
   EDGERTC_STATS_BEGIN(start);
+  errno = 0;
   ret = agent_send(&pc->agent, buf, len);
+  send_errno = ret < 0 ? errno : 0;
   EDGERTC_STATS_END(EDGERTC_STAT_DTLS_SEND_CALLBACK, start);
+  if (ret < 0) {
+    if (send_errno == EAGAIN || send_errno == EWOULDBLOCK ||
+        send_errno == EINTR || send_errno == ENOBUFS) {
+      return MBEDTLS_ERR_SSL_WANT_WRITE;
+    }
+    return MBEDTLS_ERR_NET_SEND_FAILED;
+  }
   return ret;
 }
 
@@ -243,6 +262,7 @@ PeerConnection* peer_connection_create(PeerConfiguration* config) {
   memset(&pc->sctp, 0, sizeof(pc->sctp));
 #if !CONFIG_USE_USRSCTP
   pc->sctp.sent_packet_limit = pc->config.sctp_send_cache_max_packets;
+  pc->sctp.recv_cache_limit = pc->config.sctp_receive_cache_max_bytes;
 #endif
 
   if (pc->config.audio_codec) {
@@ -287,7 +307,7 @@ void peer_connection_destroy(PeerConnection* pc) {
     rtp_decoder_deinit(&pc->vrtp_decoder);
     free(pc->artp_encoder);
     free(pc->vrtp_encoder);
-    sctp_destroy_association(&pc->sctp);
+    sctp_deinit(&pc->sctp);
     dtls_srtp_deinit(&pc->dtls_srtp);
     agent_destroy(&pc->agent);
     free(pc);
@@ -359,6 +379,16 @@ int peer_connection_datachannel_send_sid(PeerConnection* pc, char* message, size
                               SCTP_DATA_COPY, 0, 0);
 }
 
+int peer_connection_datachannel_send_buf(PeerConnection* pc, struct net_buf* message,
+                                         uint16_t sid) {
+  if (!sctp_is_connected(&pc->sctp)) {
+    return -1;
+  }
+  return sctp_outgoing_net_buf(&pc->sctp, message,
+                                pc->config.datachannel == DATA_CHANNEL_STRING ?
+                                PPID_STRING : PPID_BINARY, sid);
+}
+
 int peer_connection_create_datachannel(PeerConnection* pc, DecpChannelType channel_type, uint16_t priority, uint32_t reliability_parameter, char* label, char* protocol) {
   return peer_connection_create_datachannel_sid(pc, channel_type, priority, reliability_parameter, label, protocol, 0);
 }
@@ -399,6 +429,7 @@ int peer_connection_create_datachannel_sid(PeerConnection* pc, DecpChannelType c
   }
 
   msg[0] = DATA_CHANNEL_OPEN;
+  msg[1] = (uint8_t)channel_type;
   memcpy(msg + 2, &priority_big_endian, sizeof(uint16_t));
   memcpy(msg + 4, &reliability_big_endian, sizeof(uint32_t));
   memcpy(msg + 8, &label_length, sizeof(uint16_t));
@@ -406,8 +437,13 @@ int peer_connection_create_datachannel_sid(PeerConnection* pc, DecpChannelType c
   memcpy(msg + 12, label, strlen(label));
   memcpy(msg + 12 + strlen(label), protocol, strlen(protocol));
 
-  rtrn = sctp_outgoing_data(&pc->sctp, msg, msg_size, PPID_CONTROL, sid,
-                            SCTP_DATA_COPY, 0, 0);
+  /* Install the local stream state before sending OPEN so the first DATA
+   * message uses the same SSN/reliability policy as the DCEP handshake. */
+  if (sctp_configure_stream(&pc->sctp, sid, label, (uint8_t)channel_type,
+                             reliability_parameter) == 0) {
+    rtrn = sctp_outgoing_data(&pc->sctp, msg, msg_size, PPID_CONTROL, sid,
+                              SCTP_DATA_COPY, 0, 0);
+  }
   free(msg);
   return rtrn;
 }
@@ -468,6 +504,31 @@ int peer_connection_loop(PeerConnection* pc) {
 
           } else {
             if (dtls_srtp_probe(pc->agent_buf)) {
+#if !CONFIG_USE_USRSCTP
+              struct net_buf* packet = sctp_packet_alloc(&pc->sctp, CONFIG_MTU);
+              if (packet == NULL) {
+                /* The native RX path normally retains this packet by reference.
+                 * If the shared pool is exhausted, use the existing temporary
+                 * buffer so SACK/COOKIE control traffic can still be consumed;
+                 * DATA that must outlive this call will then attempt to make
+                 * its own owner copy if a pool entry is available. */
+                int ret = dtls_srtp_read(&pc->dtls_srtp, pc->temp_buf, sizeof(pc->temp_buf));
+                if (ret > 0) sctp_incoming_data(&pc->sctp, (char*)pc->temp_buf, ret);
+              } else {
+                /* RX fragments increment this owner's reference before the
+                 * local reference is released below.  Complete zero-copy
+                 * callbacks therefore keep the DTLS packet alive until their
+                 * message is delivered. */
+                int ret = dtls_srtp_read(&pc->dtls_srtp, packet->data, packet->size);
+                if (ret > 0) {
+                  net_buf_add(packet, ret);
+                  EDGERTC_STATS_BEGIN(start);
+                  sctp_incoming_net_buf(&pc->sctp, packet);
+                  EDGERTC_STATS_END(EDGERTC_STAT_SCTP_RECV, start);
+                }
+                net_buf_unref(packet);
+              }
+#else
               int ret = dtls_srtp_read(&pc->dtls_srtp, pc->temp_buf,
                                        sizeof(pc->temp_buf));
               LOGD("Got DTLS data %d", ret);
@@ -477,6 +538,7 @@ int peer_connection_loop(PeerConnection* pc) {
                 sctp_incoming_data(&pc->sctp, (char*)pc->temp_buf, ret);
                 EDGERTC_STATS_END(EDGERTC_STAT_SCTP_RECV, start);
               }
+#endif
 
             } else {
               if (rtp_packet_validate(pc->agent_buf, pc->agent_ret)) {
@@ -738,7 +800,9 @@ static const char* peer_connection_create_sdp(PeerConnection* pc, SdpType sdp_ty
         }
         break;
       case SDP_MEDIA_DATACHANNEL:
-        sdp_append_datachannel(pc->sdp, media[i].mid);
+        /* Keep the peer-facing SDP limit consistent with the native RX budget. */
+        sdp_append_datachannel(pc->sdp, media[i].mid,
+                               sctp_receive_message_limit(&pc->sctp));
         break;
       default:
         break;

@@ -106,6 +106,7 @@ int udp_socket_sendto(UdpSocket* udp_socket, Address* addr, const uint8_t* buf, 
   struct sockaddr* sa;
   socklen_t sock_len;
   int ret = -1;
+  int send_errno;
 
   if (udp_socket->fd < 0) {
     LOGE("sendto before socket init");
@@ -128,9 +129,12 @@ int udp_socket_sendto(UdpSocket* udp_socket, Address* addr, const uint8_t* buf, 
 
   EDGERTC_STATS_BEGIN(start);
   ret = sendto(udp_socket->fd, buf, len, 0, sa, sock_len);
+  send_errno = ret < 0 ? errno : 0;
   EDGERTC_STATS_END(EDGERTC_STAT_UDP_SEND, start);
   if (ret < 0) {
-    LOGD("Failed to sendto: %s", strerror(errno));
+    LOGW("UDP send failed: fd=%d bytes=%d errno=%d (%s)",
+         udp_socket->fd, len, send_errno, strerror(send_errno));
+    errno = send_errno;
     return -1;
   }
 

@@ -286,6 +286,7 @@ static int dtls_srtp_selfsign_cert(DtlsSrtp* dtls_srtp) {
   mbedtls_mpi_init(&serial);
   mbedtls_mpi_fill_random(&serial, 16, mbedtls_ctr_drbg_random, &dtls_srtp->ctr_drbg);
   ret = mbedtls_x509write_crt_set_serial(&crt, &serial);
+  mbedtls_mpi_free(&serial);
   if (ret < 0) {
     LOGE("mbedtls_x509write_crt_set_serial failed -0x%.4x", (unsigned int)-ret);
   }

@@ -78,6 +78,20 @@ static inline BaseType_t xQueueSendToFront(QueueHandle_t queue, const void *data
     return pdPASS;
 }
 
+static inline UBaseType_t uxQueueMessagesWaiting(QueueHandle_t queue)
+{
+    pthread_mutex_lock(&queue->lock);
+    UBaseType_t count = queue->count;
+    pthread_mutex_unlock(&queue->lock);
+    return count;
+}
+
+static inline void vQueueDelete(QueueHandle_t queue)
+{
+    pthread_cond_destroy(&queue->changed);
+    pthread_mutex_destroy(&queue->lock);
+}
+
 static inline BaseType_t xQueueReceive(QueueHandle_t queue, void *data, TickType_t timeout)
 {
     struct timespec deadline;

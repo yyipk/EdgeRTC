@@ -5,15 +5,10 @@
 #include "edgertc_stats.h"
 #include "ports.h"
 #include "sctp.h"
+#include "sctp_native.h"
 #include "utils.h"
 #if CONFIG_USE_USRSCTP
 #include <usrsctp.h>
-#endif
-
-#if CONFIG_EDGERTC_SCTP_DEBUG
-#define SCTP_DIAG_LOG(fmt, ...) LOGI("sctp_diag: " fmt, ##__VA_ARGS__)
-#else
-#define SCTP_DIAG_LOG(fmt, ...)
 #endif
 
 static const uint32_t crc32c_table[4][256] = {
@@ -313,117 +308,113 @@ static uint32_t sctp_get_checksum(Sctp* sctp, const uint8_t* buf, size_t len) {
 }
 
 #if !CONFIG_USE_USRSCTP
-#define SCTP_FORWARD_RETRY_MS 100U
-#define SCTP_GAP_WAIT_MS 100U
-#define SCTP_RETRANSMIT_CHECK_MS 150U
-#define SCTP_RETRANSMIT_INTERVAL_MS 300U
 
-struct SctpSentPacket {
-  SctpSentPacket* next;
-  size_t length;
-  uint32_t tsn;
-  uint32_t last_send_ms;
-  uint32_t resend_count;
-  uint8_t data[SCTP_MTU];
-};
+/*
+ * Native libpeer SCTP uses the SDK net_buf allocator for packet lifetime.  The
+ * connection's pool contains descriptors and storage for DTLS plaintext packets, retained
+ * RX owners, TX handshake packets, and legacy TX fragment copies.  DATA RX
+ * normally keeps the one DTLS packet and increments its reference count; it
+ * does not copy each fragment into a second cache buffer.
+ */
+static int sctp_packet_pool_init(Sctp* sctp) {
+  size_t budget = sctp->recv_cache_limit ? sctp->recv_cache_limit : 32768U;
+  size_t tx_capacity = sctp->sent_packet_limit ? sctp->sent_packet_limit : 4U;
+  size_t rx_capacity = budget / CONFIG_MTU + (budget % CONFIG_MTU != 0) + 2U;
+  size_t count;
+  size_t arena_size;
+  struct net_buf_pool* packets;
 
-enum {
-  SCTP_FORWARD_STATE_IDLE,
-  SCTP_FORWARD_STATE_GAP_WAIT,
-  SCTP_FORWARD_STATE_PENDING,
-};
-
-static int sctp_tsn_gte(uint32_t lhs, uint32_t rhs) {
-  return (int32_t)(lhs - rhs) >= 0;
+  if (sctp->packets) return 0;
+  /* RX descriptor capacity + every TX packet + handshake and DTLS input.
+   * RX must still fit when TX is full; there is no separate slot-count setting. */
+  if (tx_capacity > UINT16_MAX - 2U || rx_capacity > UINT16_MAX - tx_capacity - 2U) return -1;
+  count = rx_capacity + tx_capacity + 2U;
+  arena_size = net_buf_pool_arena_size(count, CONFIG_MTU, 0);
+  if (!arena_size || arena_size > SIZE_MAX - sizeof(*packets)) return -1;
+  packets = calloc(1, sizeof(*packets) + arena_size);
+  if (!packets) return -1;
+  if (net_buf_pool_init(packets, packets + 1, arena_size,
+                       count, CONFIG_MTU, 0, NULL) < 0) {
+    free(packets);
+    return -1;
+  }
+  sctp->packets = packets;
+  SCTP_DIAG_LOG("packet init slots=%u tx=%u rx=%u", (unsigned int)count,
+                (unsigned int)tx_capacity, (unsigned int)rx_capacity);
+  return 0;
 }
 
-static void sctp_reset_receive(Sctp* sctp, uint32_t cumulative_tsn,
-                               uint8_t initialized) {
-  sctp->recv_cumulative_tsn = cumulative_tsn;
-  sctp->recv_initialized = initialized;
-  memset(sctp->recv_tsn_map, 0, sizeof(sctp->recv_tsn_map));
+struct net_buf* sctp_packet_alloc(Sctp* sctp, size_t size) {
+  struct net_buf* packet;
+
+  /* Fixed data slots cannot grow to satisfy a larger request. */
+  if (!sctp || !sctp->packets || size == 0 || size > CONFIG_MTU) {
+    return NULL;
+  }
+  packet = net_buf_alloc_len(sctp->packets, size, K_NO_WAIT);
+  if (packet != NULL) {
+    /* Keep the public allocator's requested-capacity semantics; the backing
+     * fixed slot remains CONFIG_MTU bytes and is returned as one unit. */
+    packet->size = size;
+  }
+  return packet;
 }
 
-static int sctp_received_tsn(Sctp* sctp, uint32_t tsn) {
-  uint32_t index = tsn % SCTP_RECEIVE_TSN_WINDOW;
+int sctp_write_packet(Sctp* sctp, uint8_t* data, size_t size) {
+  SctpHeader* header = (SctpHeader*)data;
 
-  return (sctp->recv_tsn_map[index / 32U] &
-          (1U << (index % 32U))) != 0;
+  if (size < sizeof(*header) || size > CONFIG_MTU) {
+    return -1;
+  }
+  /* This is the single native wire-finalization point.  All packet builders
+   * may use sctp->buf, but the header, verification tag and CRC are filled
+   * immediately before DTLS transmission. */
+  header->source_port = htons(sctp->local_port);
+  header->destination_port = htons(sctp->remote_port);
+  header->verification_tag = sctp->verification_tag;
+  header->checksum = 0;
+  header->checksum = sctp_get_checksum(sctp, data, size);
+  return dtls_srtp_write(sctp->dtls_srtp, data, size) < 0 ? -1 : 0;
 }
 
-static void sctp_advance_receive(Sctp* sctp, uint32_t cumulative_tsn) {
-  uint32_t distance = cumulative_tsn - sctp->recv_cumulative_tsn;
-  uint32_t i;
-
-  if (distance >= SCTP_RECEIVE_TSN_WINDOW) {
-    memset(sctp->recv_tsn_map, 0, sizeof(sctp->recv_tsn_map));
-  } else {
-    for (i = 1; i <= distance; i++) {
-      uint32_t index = (sctp->recv_cumulative_tsn + i) %
-                       SCTP_RECEIVE_TSN_WINDOW;
-
-      sctp->recv_tsn_map[index / 32U] &= ~(1U << (index % 32U));
-    }
-  }
-  sctp->recv_cumulative_tsn = cumulative_tsn;
-  while (sctp_received_tsn(sctp, sctp->recv_cumulative_tsn + 1U)) {
-    uint32_t index = ++sctp->recv_cumulative_tsn % SCTP_RECEIVE_TSN_WINDOW;
-
-    sctp->recv_tsn_map[index / 32U] &= ~(1U << (index % 32U));
+static void sctp_clear_handshake(Sctp* sctp) {
+  if (sctp->handshake) {
+    net_buf_unref(sctp->handshake);
+    sctp->handshake = NULL;
   }
 }
 
-static void sctp_send_receive_sack(Sctp* sctp, const uint32_t* duplicates,
-                                   uint16_t duplicate_count) {
-  SctpPacket* packet = (SctpPacket*)sctp->buf;
-  SctpSackChunk* sack = (SctpSackChunk*)packet->chunks;
-  uint16_t gap_count = 0;
-  uint32_t offset = 1;
-  size_t chunk_length = sizeof(SctpSackChunk);
-  size_t packet_length;
-  uint16_t i;
+static int sctp_save_handshake(Sctp* sctp, const uint8_t* data, size_t size) {
+  /* sctp->buf is shared by every control response and may be overwritten by
+   * onopen or a later packet.  Handshake retransmission therefore owns an
+   * immutable net_buf snapshot instead of retaining the scratch pointer. */
+  struct net_buf* packet = sctp_packet_alloc(sctp, size);
+  if (!packet) return -1;
+  net_buf_add_mem(packet, data, size);
+  sctp_clear_handshake(sctp);
+  sctp->handshake = packet;
+  sctp->handshake_sent_ms = ports_get_time_ms();
+  sctp->handshake_timeout_ms = 20;
+  return 0;
+}
 
-  memset(packet, 0, sizeof(SctpHeader) + sizeof(SctpSackChunk));
-  while (offset <= SCTP_RECEIVE_TSN_WINDOW) {
-    uint16_t block[2];
-
-    if (!sctp_received_tsn(sctp, sctp->recv_cumulative_tsn + offset)) {
-      offset++;
-      continue;
-    }
-    block[0] = htons(offset);
-    do {
-      offset++;
-    } while (offset <= SCTP_RECEIVE_TSN_WINDOW &&
-             sctp_received_tsn(sctp, sctp->recv_cumulative_tsn + offset));
-    block[1] = htons(offset - 1U);
-    memcpy((uint8_t*)sack + chunk_length, block, sizeof(block));
-    chunk_length += sizeof(block);
-    gap_count++;
-  }
-  for (i = 0; i < duplicate_count; i++) {
-    uint32_t tsn = htonl(duplicates[i]);
-
-    memcpy((uint8_t*)sack + chunk_length, &tsn, sizeof(tsn));
-    chunk_length += sizeof(tsn);
-  }
-  sack->common.type = SCTP_SACK;
-  sack->common.length = htons(chunk_length);
-  sack->cumulative_tsn_ack = htonl(sctp->recv_cumulative_tsn);
-  /* Payload is consumed synchronously; only receipt bits remain buffered. */
-  sack->a_rwnd = htonl(SCTP_RECEIVE_WINDOW);
-  sack->number_of_gap_ack_blocks = htons(gap_count);
-  sack->number_of_dup_tsns = htons(duplicate_count);
-  packet->header.source_port = htons(sctp->local_port);
-  packet->header.destination_port = htons(sctp->remote_port);
-  packet->header.verification_tag = sctp->verification_tag;
-  packet_length = sizeof(SctpHeader) + chunk_length;
-  packet->header.checksum = sctp_get_checksum(sctp, sctp->buf, packet_length);
-  dtls_srtp_write(sctp->dtls_srtp, sctp->buf, packet_length);
+void sctp_abort(Sctp* sctp, uint16_t cause) {
+  /* ABORT is terminal for this association: send the cause first, then release
+   * all TX owners/RX fragments so timers and callbacks cannot revive it. */
+  SctpChunkCommon* chunk = (SctpChunkCommon*)(sctp->buf + sizeof(SctpHeader));
+  uint16_t error[] = {htons(cause), htons(4)};
+  chunk->type = SCTP_ABORT;
+  chunk->flags = 0;
+  chunk->length = htons(sizeof(*chunk) + sizeof(error));
+  memcpy(chunk + 1, error, sizeof(error));
+  sctp_write_packet(sctp, sctp->buf, sizeof(SctpHeader) + sizeof(*chunk) + sizeof(error));
+  LOGW("SCTP receive closed: cause=%u", cause);
+  sctp_destroy_association(sctp);
+  if (sctp->onclose) sctp->onclose(sctp->userdata);
 }
 
 static SctpChunkParam* sctp_find_init_param(SctpInitChunk* init,
-                                            uint16_t type) {
+                                          uint16_t type) {
   uint16_t chunk_length = ntohs(init->common.length);
   size_t pos = sizeof(SctpInitChunk);
 
@@ -432,7 +423,7 @@ static SctpChunkParam* sctp_find_init_param(SctpInitChunk* init,
     uint16_t param_length = ntohs(param->length);
 
     if (param_length < sizeof(SctpChunkParam) ||
-        pos + param_length > chunk_length) {
+        param_length > chunk_length - pos) {
       return NULL;
     }
     if (ntohs(param->type) == type) {
@@ -442,529 +433,45 @@ static SctpChunkParam* sctp_find_init_param(SctpInitChunk* init,
   }
   return NULL;
 }
+#else
+static int sctp_outgoing_data_cb(void* userdata, void* buf, size_t len,
+                                 uint8_t tos, uint8_t set_df) {
+  Sctp* sctp = userdata;
 
-#endif
-
-static int sctp_outgoing_data_cb(void* userdata, void* buf, size_t len, uint8_t tos, uint8_t set_df) {
-  Sctp* sctp = (Sctp*)userdata;
-  int ret = dtls_srtp_write(sctp->dtls_srtp, buf, len);
-
-#if CONFIG_EDGERTC_SCTP_DEBUG && !CONFIG_USE_USRSCTP
-  sctp->last_dtls_write_ret = ret;
-#endif
-  return ret < 0 ? -1 : 0;
-}
-
-#if !CONFIG_USE_USRSCTP
-static int sctp_stream_no_retransmit(Sctp* sctp, uint16_t sid) {
-  int i;
-
-  for (i = 0; i < sctp->stream_count; i++) {
-    if (sctp->stream_table[i].sid == sid) {
-      return sctp->stream_table[i].no_retransmit;
-    }
-  }
-  return 0;
-}
-
-static int sctp_sent_cache_has_space(Sctp* sctp, size_t len,
-                                     size_t payload_max) {
-  size_t required = (len - 1U) / payload_max + 1U;
-
-  if (required > sctp->sent_packet_limit ||
-      sctp->sent_packet_count > sctp->sent_packet_limit - required) {
-    LOGW("SCTP send cache full used=%u required=%u limit=%u packets",
-         (unsigned int)sctp->sent_packet_count, (unsigned int)required,
-         (unsigned int)sctp->sent_packet_limit);
-    return 0;
-  }
-  return 1;
-}
-
-static int sctp_sent_cache_create(Sctp* sctp) {
-  size_t i;
-
-  if (sctp->sent_packet_limit == 0) {
-    return 0;
-  }
-  sctp->sent_packet_pool = calloc(sctp->sent_packet_limit,
-                                  sizeof(*sctp->sent_packet_pool));
-  if (sctp->sent_packet_pool == NULL) {
-    LOGE("SCTP send cache allocation failed packets=%u",
-         (unsigned int)sctp->sent_packet_limit);
-    return -1;
-  }
-  for (i = 0; i < sctp->sent_packet_limit; i++) {
-    sctp->sent_packet_pool[i].next = sctp->sent_packets_free;
-    sctp->sent_packets_free = &sctp->sent_packet_pool[i];
-  }
-  return 0;
-}
-
-static SctpSentPacket* sctp_sent_cache_take(Sctp* sctp) {
-  SctpSentPacket* packet = sctp->sent_packets_free;
-
-  if (packet != NULL) {
-    sctp->sent_packets_free = packet->next;
-  }
-  return packet;
-}
-
-static void sctp_sent_cache_put(Sctp* sctp, SctpSentPacket* packet) {
-  packet->next = sctp->sent_packets_free;
-  sctp->sent_packets_free = packet;
-}
-
-static void sctp_cache_sent_packet(Sctp* sctp, SctpSentPacket* packet,
-                                   uint32_t tsn, size_t length,
-                                   uint32_t now_ms) {
-  packet->next = NULL;
-  packet->length = length;
-  packet->tsn = tsn;
-  packet->last_send_ms = now_ms;
-  packet->resend_count = 0;
-  if (sctp->sent_packets_tail != NULL) {
-    sctp->sent_packets_tail->next = packet;
-  } else {
-    sctp->sent_packets = packet;
-  }
-  sctp->sent_packets_tail = packet;
-  sctp->sent_packet_count++;
-}
-
-static int sctp_retransmit_packet(Sctp* sctp, SctpSentPacket* packet,
-                                  uint32_t now_ms, const char* reason) {
-  if (now_ms - packet->last_send_ms <= SCTP_RETRANSMIT_INTERVAL_MS) {
-    return 0;
-  }
-  if (sctp_outgoing_data_cb(sctp, packet->data, packet->length, 0, 0) < 0) {
-    LOGW("SCTP retransmit failed tsn=%lu reason=%s",
-         (unsigned long)packet->tsn, reason);
-    return -1;
-  }
-  packet->last_send_ms = now_ms;
-  packet->resend_count++;
-  LOGW("SCTP retransmit tsn=%lu retry=%u reason=%s",
-       (unsigned long)packet->tsn, packet->resend_count, reason);
-  return 1;
-}
-
-static int sctp_read_gap_block(SctpSackChunk* sack, uint16_t index,
-                               uint16_t* start, uint16_t* end) {
-  uint16_t value;
-
-  memcpy(&value, sack->blocks + (size_t)index * 4U, sizeof(value));
-  *start = ntohs(value);
-  memcpy(&value, sack->blocks + (size_t)index * 4U + sizeof(value),
-         sizeof(value));
-  *end = ntohs(value);
-  return *start > 0 && *start <= *end;
-}
-
-static int sctp_tsn_is_gap_acked(SctpSackChunk* sack, uint16_t gap_blocks,
-                                 uint32_t cumulative_tsn_ack, uint32_t tsn) {
-  uint32_t offset = tsn - cumulative_tsn_ack;
-  uint16_t i;
-
-  if (offset == 0 || offset > UINT16_MAX) {
-    return 0;
-  }
-  for (i = 0; i < gap_blocks; i++) {
-    uint16_t start;
-    uint16_t end;
-
-    sctp_read_gap_block(sack, i, &start, &end);
-    if (offset >= start && offset <= end) {
-      return 1;
-    }
-  }
-  return 0;
-}
-
-static void sctp_handle_reliable_sack(Sctp* sctp, SctpSackChunk* sack,
-                                      uint16_t gap_blocks,
-                                      uint32_t cumulative_tsn_ack,
-                                      uint16_t highest_gap,
-                                      uint32_t now_ms) {
-  SctpSentPacket* current = sctp->sent_packets;
-  SctpSentPacket* previous = NULL;
-  uint32_t highest_sent_tsn = sctp->tsn - 1;
-
-  if (!sctp_tsn_gte(cumulative_tsn_ack, sctp->last_sack_tsn) ||
-      !sctp_tsn_gte(highest_sent_tsn, cumulative_tsn_ack) ||
-      (highest_gap > 0 &&
-       !sctp_tsn_gte(highest_sent_tsn,
-                     cumulative_tsn_ack + highest_gap))) {
-    return;
-  }
-  sctp->last_sack_tsn = cumulative_tsn_ack;
-
-  while (current != NULL) {
-    SctpSentPacket* next = current->next;
-
-    if (sctp_tsn_gte(cumulative_tsn_ack, current->tsn) ||
-        sctp_tsn_is_gap_acked(sack, gap_blocks,
-                             cumulative_tsn_ack, current->tsn)) {
-      if (previous != NULL) {
-        previous->next = next;
-      } else {
-        sctp->sent_packets = next;
-      }
-      if (sctp->sent_packets_tail == current) {
-        sctp->sent_packets_tail = previous;
-      }
-      sctp->sent_packet_count--;
-      if (current->resend_count > 0) {
-        LOGI("SCTP retransmission acknowledged tsn=%lu retries=%u",
-             (unsigned long)current->tsn, current->resend_count);
-      }
-      sctp_sent_cache_put(sctp, current);
-      current = next;
-      continue;
-    }
-    if (highest_gap > 0 &&
-        sctp_tsn_gte(current->tsn, cumulative_tsn_ack + 1) &&
-        sctp_tsn_gte(cumulative_tsn_ack + highest_gap, current->tsn)) {
-      sctp_retransmit_packet(sctp, current, now_ms, "SACK gap");
-    }
-    previous = current;
-    current = next;
-  }
-}
-
-static int sctp_send_forward_tsn(Sctp* sctp, uint32_t now_ms, int force) {
-  SctpPacket* packet;
-  SctpForwardTsnChunk* chunk;
-  size_t packet_length = sizeof(SctpHeader) + sizeof(SctpForwardTsnChunk);
-  int ret;
-
-  if (sctp->forward_state != SCTP_FORWARD_STATE_PENDING ||
-      !sctp->peer_supports_forward_tsn) {
-    return 0;
-  }
-  if (!force &&
-      now_ms - sctp->forward_state_since_ms < SCTP_FORWARD_RETRY_MS) {
-    return 0;
-  }
-
-  packet = (SctpPacket*)sctp->buf;
-  chunk = (SctpForwardTsnChunk*)packet->chunks;
-  memset(packet, 0, packet_length);
-  packet->header.source_port = htons(sctp->local_port);
-  packet->header.destination_port = htons(sctp->remote_port);
-  packet->header.verification_tag = sctp->verification_tag;
-  chunk->common.type = SCTP_FORWARD_TSN;
-  chunk->common.length = htons(sizeof(SctpForwardTsnChunk));
-  chunk->new_cumulative_tsn = htonl(sctp->last_pr_tsn);
-  packet->header.checksum = sctp_get_checksum(
-      sctp, (const uint8_t*)packet, packet_length);
-  sctp->forward_state_since_ms = now_ms;
-  sctp->forward_attempts++;
-  ret = sctp_outgoing_data_cb(sctp, packet, packet_length, 0, 0);
-  if (sctp->forward_attempts == 1 || sctp->forward_attempts == 30) {
-    SCTP_DIAG_LOG("forward send tsn=%lu attempt=%lu ret=%d dtls_ret=%d",
-                  (unsigned long)sctp->last_pr_tsn,
-                  (unsigned long)sctp->forward_attempts, ret,
-                  sctp->last_dtls_write_ret);
-  }
-  if (sctp->forward_attempts == 1 ||
-      (sctp->forward_attempts % 10U) == 0) {
-    LOGD("SCTP forward tsn=%lu attempt=%lu ret=%d",
-         (unsigned long)sctp->last_pr_tsn,
-         (unsigned long)sctp->forward_attempts, ret);
-  }
-  return ret;
-}
-
-static void sctp_start_forward_tsn(Sctp* sctp, uint32_t now_ms,
-                                   const char* reason) {
-  if (!sctp->peer_supports_forward_tsn) {
-    return;
-  }
-  sctp->forward_state = SCTP_FORWARD_STATE_PENDING;
-  sctp->forward_state_since_ms = 0;
-  sctp->forward_attempts = 0;
-  SCTP_DIAG_LOG("pending start reason=%s tx_tsn=%lu ack_tsn=%lu last_pr_tsn=%lu dtls_ret=%d",
-                reason, (unsigned long)(sctp->tsn - 1),
-                (unsigned long)sctp->last_sack_tsn,
-                (unsigned long)sctp->last_pr_tsn,
-                sctp->last_dtls_write_ret);
-  LOGD("SCTP forward start reason=%s last_pr_tsn=%lu",
-       reason, (unsigned long)sctp->last_pr_tsn);
-  sctp_send_forward_tsn(sctp, now_ms, 1);
-}
-
-static void sctp_handle_sack(Sctp* sctp, SctpSackChunk* sack,
-                             size_t available_length) {
-  uint16_t sack_length = ntohs(sack->common.length);
-  uint16_t gap_blocks;
-  uint16_t duplicate_tsns;
-  uint32_t cumulative_tsn_ack;
-  uint32_t now_ms;
-  uint32_t retransmit_now_ms;
-  uint16_t highest_gap = 0;
-  uint16_t previous_gap_end = 0;
-  uint16_t i;
-  size_t blocks_length;
-
-  if (sack_length < sizeof(SctpSackChunk) ||
-      sack_length > available_length) {
-    return;
-  }
-  gap_blocks = ntohs(sack->number_of_gap_ack_blocks);
-  duplicate_tsns = ntohs(sack->number_of_dup_tsns);
-  blocks_length = (size_t)gap_blocks * 4U +
-                  (size_t)duplicate_tsns * sizeof(uint32_t);
-  if (blocks_length > sack_length - sizeof(SctpSackChunk)) {
-    return;
-  }
-  for (i = 0; i < gap_blocks; i++) {
-    uint16_t start;
-    uint16_t end;
-
-    if (!sctp_read_gap_block(sack, i, &start, &end) ||
-        start <= previous_gap_end) {
-      return;
-    }
-    previous_gap_end = end;
-    highest_gap = end;
-  }
-
-  cumulative_tsn_ack = ntohl(sack->cumulative_tsn_ack);
-  now_ms = ports_get_epoch_time();
-  retransmit_now_ms = ports_get_time_ms();
-#if CONFIG_EDGERTC_SCTP_DEBUG
-  sctp->debug_last_sack_ms = now_ms;
-  sctp->debug_peer_rwnd = ntohl(sack->a_rwnd);
-#endif
-  sctp->sack_count++;
-  if ((sctp->sack_count % 500U) == 0) {
-    LOGD("SCTP progress tx_tsn=%lu ack_tsn=%lu gaps=%u forward=%u",
-         (unsigned long)(sctp->tsn - 1),
-         (unsigned long)cumulative_tsn_ack,
-         (unsigned int)gap_blocks,
-         (unsigned int)sctp->forward_state);
-  }
-  sctp_handle_reliable_sack(sctp, sack, gap_blocks,
-                            cumulative_tsn_ack, highest_gap,
-                            retransmit_now_ms);
-
-  if (sctp->forward_state == SCTP_FORWARD_STATE_PENDING) {
-    if (sctp_tsn_gte(cumulative_tsn_ack, sctp->last_pr_tsn)) {
-      SCTP_DIAG_LOG("pending cleared ack_tsn=%lu last_pr_tsn=%lu attempts=%lu",
-                    (unsigned long)cumulative_tsn_ack,
-                    (unsigned long)sctp->last_pr_tsn,
-                    (unsigned long)sctp->forward_attempts);
-      LOGD("SCTP forward acknowledged ack_tsn=%lu attempts=%lu",
-           (unsigned long)cumulative_tsn_ack,
-           (unsigned long)sctp->forward_attempts);
-      sctp->forward_state = SCTP_FORWARD_STATE_IDLE;
-      sctp->forward_attempts = 0;
-    } else {
-      sctp_send_forward_tsn(sctp, now_ms, 0);
-    }
-    return;
-  }
-
-  if (gap_blocks == 0 ||
-      sctp_tsn_gte(cumulative_tsn_ack, sctp->last_pr_tsn)) {
-    sctp->forward_state = SCTP_FORWARD_STATE_IDLE;
-    return;
-  }
-  if (sctp->forward_state != SCTP_FORWARD_STATE_GAP_WAIT ||
-      cumulative_tsn_ack != sctp->gap_cumulative_tsn) {
-    sctp->forward_state = SCTP_FORWARD_STATE_GAP_WAIT;
-    sctp->gap_cumulative_tsn = cumulative_tsn_ack;
-    sctp->forward_state_since_ms = now_ms;
-    return;
-  }
-  if (now_ms - sctp->forward_state_since_ms >= SCTP_GAP_WAIT_MS) {
-    sctp_start_forward_tsn(sctp, now_ms, "sack-gap");
-  }
-}
-
-static int sctp_outgoing_data_internal(Sctp* sctp, uint8_t* buf, size_t len,
-                                       size_t headroom, size_t tailroom,
-                                       SctpDataPpid ppid, uint16_t sid,
-                                       int zero_copy) {
-  const size_t header_size = sizeof(SctpPacket) + sizeof(SctpDataChunk);
-  size_t payload_max;
-  size_t final_payload_len;
-  size_t packet_len;
-  size_t payload_len;
-  size_t pos = 0;
-  size_t remaining = len;
-  static uint16_t sqn = 0;
-  uint16_t message_sqn;
-  int send_ret;
-  int no_retransmit = ppid != PPID_CONTROL &&
-                      sctp_stream_no_retransmit(sctp, sid);
-
-  if (no_retransmit &&
-      sctp->forward_state == SCTP_FORWARD_STATE_PENDING) {
-    sctp_send_forward_tsn(sctp, ports_get_epoch_time(), 0);
-    return -1;
-  }
-
-  if (SCTP_MTU <= header_size || (SCTP_MTU & 3) != 0) {
-    return -1;
-  }
-  if (len == 0) {
-    return 0;
-  }
-  if (buf == NULL) {
-    return -1;
-  }
-  payload_max = SCTP_MTU - header_size;
-  if (!no_retransmit && sctp->sent_packet_limit > 0 &&
-      !sctp_sent_cache_has_space(sctp, len, payload_max)) {
-    return -1;
-  }
-  if (zero_copy && (no_retransmit || sctp->sent_packet_limit == 0)) {
-    if (headroom < header_size ||
-        (uintptr_t)buf < header_size ||
-        (((uintptr_t)buf - header_size) & (sizeof(uint32_t) - 1)) != 0) {
-      return -1;
-    }
-    final_payload_len = len % payload_max;
-    if (final_payload_len == 0) {
-      final_payload_len = payload_max;
-    }
-    packet_len = header_size + final_payload_len;
-    if (((4 - (packet_len & 3)) & 3) > tailroom) {
-      return -1;
-    }
-  }
-
-  message_sqn = sqn++;
-  while (remaining > 0) {
-    SctpPacket* packet;
-    SctpDataChunk* chunk;
-    SctpSentPacket* sent_packet = NULL;
-    uint32_t packet_tsn;
-
-    payload_len = remaining > payload_max ? payload_max : remaining;
-    if (!no_retransmit && sctp->sent_packet_limit > 0) {
-      sent_packet = sctp_sent_cache_take(sctp);
-      if (sent_packet == NULL) {
-        LOGE("SCTP send cache free list empty");
-        return -1;
-      }
-      packet = (SctpPacket*)sent_packet->data;
-    } else if (zero_copy) {
-      packet = (SctpPacket*)(buf + pos - header_size);
-    } else {
-      packet = (SctpPacket*)sctp->buf;
-    }
-    chunk = (SctpDataChunk*)packet->chunks;
-
-    packet->header.source_port = htons(sctp->local_port);
-    packet->header.destination_port = htons(sctp->remote_port);
-    packet->header.verification_tag = sctp->verification_tag;
-    packet->header.checksum = 0;
-
-    chunk->type = SCTP_DATA;
-    chunk->iube = 0x04;
-    if (pos == 0) {
-      chunk->iube |= 0x02;
-    }
-    if (payload_len == remaining) {
-      chunk->iube |= 0x01;
-    }
-    chunk->length = htons(payload_len + sizeof(SctpDataChunk));
-    chunk->tsn = htonl(sctp->tsn++);
-    packet_tsn = ntohl(chunk->tsn);
-    if (no_retransmit) {
-      sctp->last_pr_tsn = packet_tsn;
-    }
-    chunk->sid = htons(sid);
-    chunk->sqn = htons(message_sqn);
-    chunk->ppid = htonl(ppid);
-
-    if (sent_packet != NULL || !zero_copy) {
-      memcpy(chunk->data, buf + pos, payload_len);
-    }
-    packet_len = header_size + payload_len;
-    if ((packet_len & 3) != 0) {
-      size_t padded_len = (packet_len + 3) & ~(size_t)3;
-      memset((uint8_t*)packet + packet_len, 0, padded_len - packet_len);
-      packet_len = padded_len;
-    }
-    packet->header.checksum =
-        sctp_get_checksum(sctp, (const uint8_t*)packet, packet_len);
-
-    if (sent_packet != NULL) {
-      sctp_cache_sent_packet(sctp, sent_packet, packet_tsn, packet_len,
-                             ports_get_time_ms());
-    }
-    send_ret = sctp_outgoing_data_cb(sctp, packet, packet_len, 0, 0);
-    if (send_ret < 0) {
-      if (no_retransmit) {
-        size_t unsent_payload = remaining - payload_len;
-        size_t unsent_chunks =
-            (unsent_payload + payload_max - 1U) / payload_max;
-
-        sctp->tsn += (uint32_t)unsent_chunks;
-        sctp->last_pr_tsn = sctp->tsn - 1U;
-        sctp_start_forward_tsn(sctp, ports_get_epoch_time(), "data-send");
-      } else if (sent_packet != NULL) {
-        LOGW("SCTP initial send failed tsn=%lu; queued for retransmission",
-             (unsigned long)sent_packet->tsn);
-      }
-      return -1;
-    }
-    pos += payload_len;
-    remaining -= payload_len;
-  }
-  return (int)len;
+  return dtls_srtp_write(sctp->dtls_srtp, buf, len) < 0 ? -1 : 0;
 }
 #endif
 
 void sctp_process_timers(Sctp* sctp) {
 #if !CONFIG_USE_USRSCTP
-  SctpSentPacket* packet;
-  uint32_t now_ms;
-  uint32_t epoch_ms;
-
-  if (sctp == NULL) {
-    return;
-  }
-  epoch_ms = ports_get_epoch_time();
-#if CONFIG_EDGERTC_SCTP_DEBUG
-  if (epoch_ms - sctp->debug_last_status_ms >= 10000U) {
-    uint32_t sack_age_ms = sctp->debug_last_sack_ms == 0 ? UINT32_MAX :
-                           epoch_ms - sctp->debug_last_sack_ms;
-
-    SCTP_DIAG_LOG("status connected=%d tx_tsn=%lu ack_tsn=%lu rwnd=%lu sacks=%lu forward=%u pr_tsn=%lu attempts=%lu dtls_ret=%d sack_age_ms=%lu",
-                  sctp->connected, (unsigned long)(sctp->tsn - 1),
-                  (unsigned long)sctp->last_sack_tsn,
-                  (unsigned long)sctp->debug_peer_rwnd,
-                  (unsigned long)sctp->sack_count,
-                  (unsigned int)sctp->forward_state,
-                  (unsigned long)sctp->last_pr_tsn,
-                  (unsigned long)sctp->forward_attempts,
-                  sctp->last_dtls_write_ret,
-                  (unsigned long)sack_age_ms);
-    sctp->debug_last_status_ms = epoch_ms;
-  }
-#endif
-  if (sctp->forward_state == SCTP_FORWARD_STATE_GAP_WAIT &&
-      epoch_ms - sctp->forward_state_since_ms >= SCTP_GAP_WAIT_MS) {
-    sctp_start_forward_tsn(sctp, epoch_ms, "gap-timeout");
-  } else if (sctp->forward_state == SCTP_FORWARD_STATE_PENDING) {
-    sctp_send_forward_tsn(sctp, epoch_ms, 0);
-  }
-  now_ms = ports_get_time_ms();
-  if (now_ms - sctp->last_retransmit_check_ms <
-      SCTP_RETRANSMIT_CHECK_MS) {
-    return;
-  }
-  sctp->last_retransmit_check_ms = now_ms;
-  for (packet = sctp->sent_packets; packet != NULL; packet = packet->next) {
-    sctp_retransmit_packet(sctp, packet, now_ms, "timeout");
+  if (sctp != NULL) {
+    uint32_t now = ports_get_time_ms();
+    /* ESP's native SCTP retries INIT/COOKIE_ECHO at 20,40,80,...,640 ms.
+     * The cached packet is already checksummed and is resent byte-for-byte. */
+    if (sctp->handshake && now - sctp->handshake_sent_ms >= sctp->handshake_timeout_ms) {
+      dtls_srtp_write(sctp->dtls_srtp, sctp->handshake->data, sctp->handshake->len);
+      sctp->handshake_sent_ms = ports_get_time_ms();
+      if (sctp->handshake_timeout_ms < 640) sctp->handshake_timeout_ms *= 2;
+    }
+    sctp_tx_poll(sctp);
+    sctp_rx_poll(sctp);
   }
 #else
   (void)sctp;
+#endif
+}
+
+size_t sctp_receive_message_limit(const Sctp* sctp) {
+#if !CONFIG_USE_USRSCTP
+  size_t budget = sctp->recv_cache_limit ? sctp->recv_cache_limit : 32768U;
+  /* The receive cache charges complete DTLS packet capacity, not just DATA
+   * bytes.  Advertising half the budget leaves room for out-of-order packet
+   * owners. The pool initialization API takes a uint16_t payload size. */
+  /* shortcut: tiny fragments may exhaust storage, add compaction if such peers must be supported. */
+  return budget / 2U < UINT16_MAX ? budget / 2U : UINT16_MAX;
+#else
+  (void)sctp;
+  return 262144U;
 #endif
 }
 
@@ -992,60 +499,88 @@ int sctp_outgoing_data(Sctp* sctp, char* buf, size_t len,
     LOGE("sctp sendv error %d: %s", errno, strerror(errno));
   }
 #else
-  ret = sctp_outgoing_data_internal(sctp, (uint8_t*)buf, len,
-                                    headroom, tailroom,
-                                    ppid, sid,
-                                    mode == SCTP_DATA_ZERO_COPY);
+  ret = sctp_tx_send(sctp, (uint8_t*)buf, len, ppid, sid, mode,
+                     headroom, tailroom, NULL);
 #endif
   EDGERTC_STATS_END(EDGERTC_STAT_SCTP_SEND, start);
   return ret;
 }
 
-void sctp_add_stream_mapping(Sctp* sctp, const char* label, uint16_t sid,
-                             uint8_t no_retransmit) {
-  if (sctp->stream_count < SCTP_MAX_STREAMS) {
-    strncpy(sctp->stream_table[sctp->stream_count].label, label, sizeof(sctp->stream_table[sctp->stream_count].label));
-    sctp->stream_table[sctp->stream_count].sid = sid;
-    sctp->stream_table[sctp->stream_count].no_retransmit = no_retransmit;
-    sctp->stream_count++;
-  } else
-    LOGE("Stream table full. Cannot add more streams.");
+SctpStreamEntry* sctp_get_stream(Sctp* sctp, uint16_t sid) {
+  for (int i = 0; i < sctp->stream_count; i++) {
+    if (sctp->stream_table[i].sid == sid) {
+      return &sctp->stream_table[i];
+    }
+  }
+  return NULL;
 }
 
-static int sctp_store_data_channel_open(Sctp* sctp, uint16_t sid,
-                                        char* data, size_t length) {
-  uint32_t reliability_parameter;
-  uint16_t label_length;
-  uint16_t protocol_length;
+int sctp_configure_stream(Sctp* sctp, uint16_t sid, const char* label,
+                          uint8_t channel_type, uint32_t reliability_parameter) {
+  SctpStreamEntry* stream = sctp_get_stream(sctp, sid);
 
-  if (length < 12 || data[0] != DATA_CHANNEL_OPEN)
+  /* DCEP channel types use the low 7 bits for reliability policy and bit 7
+   * for unordered delivery: 0 reliable, 1 max-retransmits, 2 max-lifetime. */
+  if ((channel_type & 0x7fU) > 2U || label == NULL) {
     return -1;
+  }
+  if (stream == NULL) {
+    if (sctp->stream_count == SCTP_MAX_STREAMS) {
+      return -1;
+    }
+    stream = &sctp->stream_table[sctp->stream_count++];
+    memset(stream, 0, sizeof(*stream));
+    stream->sid = sid;
+  }
+  snprintf(stream->label, sizeof(stream->label), "%s", label);
+  stream->channel_type = channel_type;
+  stream->reliability_parameter = reliability_parameter;
+  stream->no_retransmit = (channel_type & 0x7fU) == 1U &&
+                          reliability_parameter == 0;
+  return 0;
+}
 
+int sctp_handle_dcep(Sctp* sctp, uint16_t sid, const uint8_t* data, size_t size) {
+  uint16_t label_length, protocol_length;
+  uint32_t reliability;
+  char label[sizeof(sctp->stream_table[0].label)];
+
+  /* DCEP OPEN is validated and installed before its ACK is queued.  The RX
+   * caller ACKs the DATA TSN only if this function succeeds, so malformed or
+   * resource-exhausted control messages can be retried instead of disappearing. */
+  if (size == 1 && data[0] == DATA_CHANNEL_ACK) {
+    return 0;
+  }
+  if (size < 12 || data[0] != DATA_CHANNEL_OPEN || (data[1] & 0x7fU) > 2U) {
+    return -1;
+  }
   memcpy(&label_length, data + 8, sizeof(label_length));
   memcpy(&protocol_length, data + 10, sizeof(protocol_length));
   label_length = ntohs(label_length);
   protocol_length = ntohs(protocol_length);
-  if (length < 12 + label_length + protocol_length)
+  if ((size_t)label_length + protocol_length > size - 12) {
     return -1;
-
-  char label[sizeof(sctp->stream_table[0].label)];
-  size_t copied = label_length < sizeof(label) - 1U ? label_length : sizeof(label) - 1U;
+  }
+#if !CONFIG_USE_USRSCTP
+  if (!sctp_tx_can_send(sctp, 1)) {
+    return -1;
+  }
+#endif
+  size_t copied = label_length < sizeof(label) - 1U ?
+                  label_length : sizeof(label) - 1U;
   memcpy(label, data + 12, copied);
   label[copied] = '\0';
-  printf("DATA_CHANNEL_OPEN: Label=%s, sid=%d\n", label, sid);
-  memcpy(&reliability_parameter, data + 4, sizeof(reliability_parameter));
-  sctp_add_stream_mapping(
-      sctp, label, sid,
-      (uint8_t)data[1] == 0x81 && ntohl(reliability_parameter) == 0);
-  return 0;
+  memcpy(&reliability, data + 4, sizeof(reliability));
+  if (sctp_configure_stream(sctp, sid, label, data[1], ntohl(reliability)) < 0) {
+    return -1;
+  }
+  char ack = DATA_CHANNEL_ACK;
+  return sctp_outgoing_data(sctp, &ack, 1, PPID_CONTROL, sid,
+                             SCTP_DATA_COPY, 0, 0) < 0 ? -1 : 0;
 }
 
 void sctp_parse_data_channel_open(Sctp* sctp, uint16_t sid, char* data, size_t length) {
-  if (sctp_store_data_channel_open(sctp, sid, data, length) == 0) {
-    char ack = DATA_CHANNEL_ACK;
-    sctp_outgoing_data(sctp, &ack, 1, DATA_CHANNEL_PPID_CONTROL, sid,
-                       SCTP_DATA_COPY, 0, 0);
-  }
+  sctp_handle_dcep(sctp, sid, (const uint8_t*)data, length);
 }
 
 void sctp_handle_sctp_packet(Sctp* sctp, char* buf, size_t len) {
@@ -1062,7 +597,7 @@ void sctp_handle_sctp_packet(Sctp* sctp, char* buf, size_t len) {
     sctp_parse_data_channel_open(sctp, sid, buf + 28, len - 28);
 }
 
-void sctp_incoming_data(Sctp* sctp, char* buf, size_t len) {
+static void sctp_input(Sctp* sctp, char* buf, size_t len, struct net_buf* owner) {
   if (!sctp || !buf)
     return;
 
@@ -1070,16 +605,17 @@ void sctp_incoming_data(Sctp* sctp, char* buf, size_t len) {
   sctp_handle_sctp_packet(sctp, buf, len);
   usrsctp_conninput(sctp, buf, len, 0);
 #else
+  /* owner is borrowed for the duration of this call.  sctp_rx_data() takes a
+   * reference only for fragments that survive the call; the peer loop drops
+   * its reference after all chunks in this DTLS packet are dispatched. */
   size_t length = 0;
   size_t pos = sizeof(SctpHeader);
-  uint32_t duplicate_tsns[16];
-  uint16_t duplicate_count = 0;
   int sack_needed = 0;
   SctpChunkCommon* chunk_common;
   SctpPacket* in_packet = (SctpPacket*)buf;
   SctpPacket* out_packet = (SctpPacket*)sctp->buf;
 
-  if (len < sizeof(SctpHeader)) {
+  if (len < sizeof(SctpHeader) || !sctp->tx || !sctp->rx) {
     return;
   }
 
@@ -1093,13 +629,16 @@ void sctp_incoming_data(Sctp* sctp, char* buf, size_t len) {
   uint32_t crc32c = in_packet->header.checksum;
 
   in_packet->header.checksum = 0;
+  uint32_t calculated = sctp_get_checksum(sctp, (const uint8_t*)buf, len);
+  in_packet->header.checksum = crc32c;
 
-  if (crc32c != sctp_get_checksum(sctp, (const uint8_t*)buf, len)) {
+  if (crc32c != calculated) {
     LOGE("checksum error");
     return;
   }
 
   while (pos < len) {
+    int notify_open = 0;
     size_t remaining = len - pos;
     size_t chunk_length;
     size_t padded_length;
@@ -1120,94 +659,20 @@ void sctp_incoming_data(Sctp* sctp, char* buf, size_t len) {
       return;
     }
 
+    /* Control replies are built in the association scratch buffer.  DATA RX
+     * does not use that buffer for payload storage, which is the RX zero-copy
+     * boundary. */
     memset(sctp->buf, 0, sizeof(sctp->buf));
     switch (chunk_common->type) {
-      case SCTP_DATA: {
-        SctpDataChunk* data_chunk = (SctpDataChunk*)(buf + pos);
-        uint32_t tsn;
-        uint32_t offset;
-        uint32_t index;
-        size_t data_length;
-        int deliver_fragment;
-
-        if (chunk_length < sizeof(SctpDataChunk)) {
-          return;
-        }
-        data_length = chunk_length - sizeof(SctpDataChunk);
-        if (!sctp->recv_initialized) {
-          break;
-        }
+      case SCTP_DATA:
+        sctp_rx_data(sctp, (const SctpDataChunk*)chunk_common, chunk_length, owner);
+        if (!sctp->rx) return;
         sack_needed = 1;
-        tsn = ntohl(data_chunk->tsn);
-        offset = tsn - sctp->recv_cumulative_tsn;
-        if (sctp_tsn_gte(sctp->recv_cumulative_tsn, tsn) ||
-            (offset <= SCTP_RECEIVE_TSN_WINDOW &&
-             sctp_received_tsn(sctp, tsn))) {
-          if (duplicate_count < sizeof(duplicate_tsns) / sizeof(duplicate_tsns[0])) {
-            duplicate_tsns[duplicate_count++] = tsn;
-          }
-          break;
-        }
-        if (offset > SCTP_RECEIVE_TSN_WINDOW) {
-          break;
-        }
-        deliver_fragment = sctp->onfragment &&
-                           ntohl(data_chunk->ppid) == DATA_CHANNEL_PPID_BINARY &&
-                           (data_chunk->iube & 0x04) &&
-                           sctp_stream_no_retransmit(sctp, ntohs(data_chunk->sid));
-        // shortcut: no generic SCTP reassembly, use the opt-in lossy fragment callback.
-        if ((data_chunk->iube & 0x03) != 0x03 && !deliver_fragment) {
-          LOGW("SCTP fragmented receive unsupported tsn=%lu flags=%02x size=%u sid=%u ssn=%u ppid=%lu",
-               (unsigned long)tsn, data_chunk->iube, (unsigned int)data_length,
-               ntohs(data_chunk->sid), ntohs(data_chunk->sqn),
-               (unsigned long)ntohl(data_chunk->ppid));
-          break;
-        }
-        /* Leave OPEN unacknowledged until its reliable DCEP ACK can be queued. */
-        if (ntohl(data_chunk->ppid) == DATA_CHANNEL_PPID_CONTROL &&
-            data_length > 0 && data_chunk->data[0] == DATA_CHANNEL_OPEN &&
-            sctp->sent_packet_limit > 0 &&
-            sctp->sent_packet_count >= sctp->sent_packet_limit) {
-          break;
-        }
-        index = tsn % SCTP_RECEIVE_TSN_WINDOW;
-        sctp->recv_tsn_map[index / 32U] |= 1U << (index % 32U);
-        sctp_advance_receive(sctp, sctp->recv_cumulative_tsn);
-
-        LOGD("SCTP_DATA. ppid = %ld, data = %.2x", ntohl(data_chunk->ppid), data_length > 0 ? data_chunk->data[0] : 0);
-        if (deliver_fragment) {
-          sctp->onfragment((char*)data_chunk->data, data_length, sctp->userdata,
-                            ntohs(data_chunk->sid), tsn, data_chunk->iube);
-        } else if (ntohl(data_chunk->ppid) == DATA_CHANNEL_PPID_CONTROL &&
-            data_length > 0 && data_chunk->data[0] == DATA_CHANNEL_OPEN) {
-          sctp_parse_data_channel_open(sctp, ntohs(data_chunk->sid),
-                                        (char*)data_chunk->data, data_length);
-        } else if (ntohl(data_chunk->ppid) == DATA_CHANNEL_PPID_DOMSTRING || ntohl(data_chunk->ppid) == DATA_CHANNEL_PPID_BINARY) {
-          // shortcut: immediate delivery, add SSN buffering before supporting ordered application channels.
-          if (sctp->onmessage) {
-            sctp->onmessage((char*)data_chunk->data, data_length,
-                            sctp->userdata, ntohs(data_chunk->sid));
-          }
-        }
-      } break;
-      case SCTP_FORWARD_TSN: {
-        SctpForwardTsnChunk* forward = (SctpForwardTsnChunk*)(buf + pos);
-        uint32_t cumulative_tsn;
-
-        if (chunk_length < sizeof(SctpForwardTsnChunk) ||
-            (chunk_length - sizeof(SctpForwardTsnChunk)) % 4U != 0) {
-          return;
-        }
-        if (!sctp->recv_initialized || !sctp->peer_supports_forward_tsn) {
-          break;
-        }
-        cumulative_tsn = ntohl(forward->new_cumulative_tsn);
-        if (cumulative_tsn != sctp->recv_cumulative_tsn &&
-            sctp_tsn_gte(cumulative_tsn, sctp->recv_cumulative_tsn)) {
-          sctp_advance_receive(sctp, cumulative_tsn);
-        }
+        break;
+      case SCTP_FORWARD_TSN:
+        sctp_rx_forward(sctp, (const SctpForwardTsnChunk*)chunk_common, chunk_length);
         sack_needed = 1;
-      } break;
+        break;
       case SCTP_INIT: {
         LOGD("SCTP_INIT");
 
@@ -1216,8 +681,10 @@ void sctp_incoming_data(Sctp* sctp, char* buf, size_t len) {
         if (chunk_length < sizeof(SctpInitChunk)) {
           return;
         }
+        /* INIT establishes the peer TSN receive baseline and determines
+         * whether FORWARD_TSN is legal for this association. */
         if (!sctp->recv_initialized) {
-          sctp_reset_receive(sctp, ntohl(init_chunk->initial_tsn) - 1U, 1);
+          sctp_rx_reset(sctp, ntohl(init_chunk->initial_tsn) - 1U, 1);
         }
         sctp->verification_tag = init_chunk->initiate_tag;
         sctp->peer_supports_forward_tsn =
@@ -1229,7 +696,7 @@ void sctp_incoming_data(Sctp* sctp, char* buf, size_t len) {
         init_ack->common.flags = 0x00;
         init_ack->common.length = htons(20 + 8 + 4);
         init_ack->initiate_tag = htonl(0x12345678);
-        init_ack->a_rwnd = htonl(SCTP_RECEIVE_WINDOW);
+        init_ack->a_rwnd = htonl(sctp->recv_cache_limit);
         init_ack->number_of_outbound_streams = 0xffff;
         init_ack->number_of_inbound_streams = 0xffff;
         init_ack->initial_tsn = htonl(sctp->tsn);
@@ -1253,6 +720,11 @@ void sctp_incoming_data(Sctp* sctp, char* buf, size_t len) {
         if (chunk_length < sizeof(SctpInitChunk)) {
           return;
         }
+        /* Accept INIT_ACK only while our cached INIT is outstanding.  This
+         * prevents a stale response from replacing a live association's
+         * verification tag or cookie state. */
+        if (sctp->connected || !sctp->handshake ||
+            sctp->handshake->data[sizeof(SctpHeader)] != SCTP_INIT) break;
         sctp->verification_tag = init_ack->initiate_tag;
         sctp->peer_supports_forward_tsn =
             sctp_find_init_param(init_ack,
@@ -1265,76 +737,38 @@ void sctp_incoming_data(Sctp* sctp, char* buf, size_t len) {
           return;
         }
         if (!sctp->recv_initialized) {
-          sctp_reset_receive(sctp, ntohl(init_ack->initial_tsn) - 1U, 1);
+          sctp_rx_reset(sctp, ntohl(init_ack->initial_tsn) - 1U, 1);
         }
 
         cookie_echo->common.type = SCTP_COOKIE_ECHO;
         cookie_echo->common.flags = 0x00;
-        // cookie echo: type + flag + length (4 bytes) + cookie
+        /* Replace the cached INIT with COOKIE_ECHO.  The cookie bytes exclude
+         * the parameter's four-byte type/length header. */
         cookie_echo->common.length = htons(ntohs(param->length));
         // param: type + length (4 bytes) + cookie
         memcpy(cookie_echo->cookie, param->value, ntohs(param->length) - 4);
         length = ntohs(cookie_echo->common.length) + sizeof(SctpHeader);
       } break;
-      case SCTP_SACK: {
-        SctpSackChunk* sack = (SctpSackChunk*)(buf + pos);
-
-        if (chunk_length < sizeof(SctpSackChunk)) {
-          return;
-        }
-        sctp_handle_sack(sctp, sack, chunk_length);
-#if 0
-        LOGD("SCTP_SACK");
-        sack = (SctpSackChunk*)in_packet->chunks;
-        LOGD("cumulative_tsn_ack %d", ntohl(sack->cumulative_tsn_ack));
-        LOGD("a_rwnd %d", ntohl(sack->a_rwnd));
-        LOGD("number_of_gap_ack_blocks %d", sack->number_of_gap_ack_blocks);
-        LOGD("number_of_dup_tsns %d", sack->number_of_dup_tsns);
-#endif
-// XXX: unordered sequence
-#if 0
-        if (sack->number_of_gap_ack_blocks > 0) {
-
-          int blocks = ntohs(sack->number_of_gap_ack_blocks);
-          LOGW("cumulative_tsn_ack: %ld, number_of_gap_ack_blocks: %d",
-           ntohl(sack->cumulative_tsn_ack), blocks);
-
-          for (int i = 0; i < blocks; i++) {
-
-            uint16_t *start = (uint16_t*)sack->blocks + i*2;
-            uint16_t *end = (uint16_t*)sack->blocks + i*2 + 1;
-            LOGW("start: %d, end: %d", ntohs(*start), ntohs(*end));
-            sctp->tsn = ntohl(sack->cumulative_tsn_ack) + 1;// + (*start) - 1;
-          }
-        } else if (sack->number_of_dup_tsns > 0) {
-
-          LOGW("cumulative_tsn_ack: %ld, number_of_dup_tsns: %d",
-           ntohl(sack->cumulative_tsn_ack),
-           ntohs(sack->number_of_dup_tsns));
-        }
-#endif
+      case SCTP_SACK:
+        sctp_tx_sack(sctp, (const SctpSackChunk*)chunk_common, chunk_length);
         break;
-      }
       case SCTP_COOKIE_ECHO: {
         LOGD("SCTP_COOKIE_ECHO");
         SctpChunkCommon* common = (SctpChunkCommon*)out_packet->chunks;
         common->type = SCTP_COOKIE_ACK;
         common->length = htons(4);
         length = ntohs(common->length) + sizeof(SctpHeader);
-        if (!sctp->connected) {
-          sctp->connected = 1;
-          if (sctp->onopen) {
-            sctp->onopen(sctp->userdata);
-          }
-        }
+        /* Send COOKIE_ACK before onopen: application code may immediately send
+         * DATA and overwrite the shared output scratch buffer. */
+        notify_open = !sctp->connected;
       } break;
       case SCTP_COOKIE_ACK: {
-        if (!sctp->connected) {
-          sctp->connected = 1;
-          if (sctp->onopen) {
-            sctp->onopen(sctp->userdata);
-          }
-        }
+        /* Only a COOKIE_ACK matching our cached COOKIE_ECHO completes the
+         * client side.  Clearing that cache after the wire response prevents
+         * duplicate COOKIE_ACKs from firing onopen twice. */
+        if (sctp->handshake &&
+            sctp->handshake->data[sizeof(SctpHeader)] == SCTP_COOKIE_ECHO)
+          notify_open = !sctp->connected;
         break;
       }
       case SCTP_HEARTBEAT: {
@@ -1396,11 +830,11 @@ void sctp_incoming_data(Sctp* sctp, char* buf, size_t len) {
         SCTP_DIAG_LOG("abort reason: %s (len=%u)", cause_reason,
                       (unsigned int)cause_reason_len);
 #endif
-        sctp->connected = 0;
+        sctp_destroy_association(sctp);
         if (sctp->onclose) {
           sctp->onclose(sctp->userdata);
         }
-        break;
+        return;
       }
       default:
         LOGI("Unknown chunk type %d", chunk_common->type);
@@ -1420,19 +854,70 @@ void sctp_incoming_data(Sctp* sctp, char* buf, size_t len) {
         return;
       }
       out_packet->header.checksum = sctp_get_checksum(sctp, sctp->buf, length);
-      dtls_srtp_write(sctp->dtls_srtp, sctp->buf, length);
-      // sctp_outgoing_data_cb(sctp, sctp->buf, SCTP_MTU, 0, 0);
+      /* INIT_ACK is answered synchronously and need not be cached: a repeated
+       * INIT causes the peer to request a fresh response.  COOKIE_ECHO, and
+       * the locally sent INIT, are cached because their retransmission is
+       * driven by the timer below. */
+      if (chunk_common->type == SCTP_INIT_ACK &&
+          sctp_save_handshake(sctp, sctp->buf, length) < 0) return;
+      if (dtls_srtp_write(sctp->dtls_srtp, sctp->buf, length) < 0) {
+        pos += padded_length;
+        continue;
+      }
+    }
+    if (notify_open) {
+      sctp_clear_handshake(sctp);
+      sctp->connected = 1;
+      /* onopen may send DATA and overwrite the shared packet scratch. */
+      if (sctp->onopen) sctp->onopen(sctp->userdata);
     }
     pos += padded_length;
   }
   if (sack_needed) {
-    sctp_send_receive_sack(sctp, duplicate_tsns, duplicate_count);
+    sctp_rx_sack(sctp);
   }
 #endif
 }
 
-static int sctp_handle_incoming_data(Sctp* sctp, char* data, size_t len, uint32_t ppid, uint16_t sid, int flags) {
+void sctp_incoming_data(Sctp* sctp, char* buf, size_t len) {
+  sctp_input(sctp, buf, len, NULL);
+}
+
+void sctp_incoming_net_buf(Sctp* sctp, struct net_buf* packet) {
+#if !CONFIG_USE_USRSCTP
+  if (packet != NULL) {
+    /* packet is borrowed; the caller owns the final unref.  RX retains it only
+     * for DATA fragments that cannot be delivered synchronously. */
+    sctp_input(sctp, (char*)packet->data, packet->len, packet);
+  }
+#else
+  (void)sctp;
+  (void)packet;
+#endif
+}
+
+int sctp_outgoing_net_buf(Sctp* sctp, struct net_buf* message,
+                          SctpDataPpid ppid, uint16_t sid) {
+#if !CONFIG_USE_USRSCTP
+  /* Native TX takes one reference to this contiguous message and keeps it
+   * until cumulative SACK or abandon.  A fragmented net_buf is rejected
+   * because the current DTLS/SCTP packetizer needs one addressable span. */
+  if (message == NULL || message->frags != NULL) {
+    return -1;
+  }
+  return sctp_tx_send(sctp, message->data, message->len, ppid, sid,
+                       SCTP_DATA_COPY, 0, 0, message);
+#else
+  (void)sctp;
+  (void)message;
+  (void)ppid;
+  (void)sid;
+  return -1;
+#endif
+}
+
 #if CONFIG_USE_USRSCTP
+static int sctp_handle_incoming_data(Sctp* sctp, char* data, size_t len, uint32_t ppid, uint16_t sid, int flags) {
   switch (ppid) {
     case DATA_CHANNEL_PPID_CONTROL:
       break;
@@ -1451,11 +936,8 @@ static int sctp_handle_incoming_data(Sctp* sctp, char* data, size_t len, uint32_
     default:
       break;
   }
-#endif
   return 0;
 }
-
-#if CONFIG_USE_USRSCTP
 
 static void sctp_process_notification(Sctp* sctp, union sctp_notification* notification, size_t len) {
   if (notification->sn_header.sn_length != (uint32_t)len) {
@@ -1525,18 +1007,22 @@ int sctp_create_association(Sctp* sctp, DtlsSrtp* dtls_srtp) {
   sctp->local_port = 5000;
   sctp->remote_port = 5000;
   sctp->tsn = 1234;
+  sctp->connected = 0;
+  sctp->verification_tag = 0;
+  /* peer_connection_create_sdp reuses this Sctp object across renegotiation;
+   * stream SSNs belong to the old association and must start at zero again. */
+  sctp->stream_count = 0;
+  memset(sctp->stream_table, 0, sizeof(sctp->stream_table));
 #if !CONFIG_USE_USRSCTP
-  sctp_reset_receive(sctp, 0, 0);
-  if (sctp_sent_cache_create(sctp) < 0) {
+  libpeer_net_buf_init();
+  sctp->last_sack_tsn = sctp->tsn - 1;
+  if (sctp_packet_pool_init(sctp) < 0 || sctp_tx_init(sctp) < 0 || sctp_rx_init(sctp) < 0) {
+    sctp_tx_destroy(sctp);
+    sctp_rx_destroy(sctp);
     return -1;
   }
-  sctp->last_sack_tsn = sctp->tsn - 1;
-  sctp->last_retransmit_check_ms = 0;
-  sctp->last_pr_tsn = sctp->tsn - 1;
-  sctp->sack_count = 0;
-  sctp->forward_attempts = 0;
+  sctp_rx_reset(sctp, 0, 0);
   sctp->peer_supports_forward_tsn = 0;
-  sctp->forward_state = SCTP_FORWARD_STATE_IDLE;
 #endif
 #if CONFIG_USE_USRSCTP
   int ret = -1;
@@ -1635,7 +1121,9 @@ int sctp_create_association(Sctp* sctp, DtlsSrtp* dtls_srtp) {
 
   sctp->sock = sock;
 #else
-  // send SCTP_INIT
+  /* Client handshake starts with INIT.  The exact wire bytes are retained in
+   * a net_buf before the first send so a lost INIT can be retransmitted without
+   * rebuilding it from mutable sctp->buf. */
   int length = 0;
   SctpInitChunk* init_chunk;
   SctpChunkParam* param;
@@ -1652,7 +1140,7 @@ int sctp_create_association(Sctp* sctp, DtlsSrtp* dtls_srtp) {
   init_chunk->common.flags = 0x00;
   init_chunk->common.length = htons(20 + 4);
   init_chunk->initiate_tag = htonl(0x12345678);
-  init_chunk->a_rwnd = htonl(SCTP_RECEIVE_WINDOW);
+  init_chunk->a_rwnd = htonl(sctp->recv_cache_limit);
   init_chunk->number_of_outbound_streams = 0xffff;
   init_chunk->number_of_inbound_streams = 0xffff;
   init_chunk->initial_tsn = htonl(sctp->tsn);
@@ -1662,6 +1150,10 @@ int sctp_create_association(Sctp* sctp, DtlsSrtp* dtls_srtp) {
   length = ntohs(init_chunk->common.length) + sizeof(SctpHeader);
   length = (4 * ((length + 3) / 4));
   header->checksum = sctp_get_checksum(sctp, sctp->buf, length);
+  if (sctp_save_handshake(sctp, sctp->buf, length) < 0) {
+    sctp_destroy_association(sctp);
+    return -1;
+  }
   dtls_srtp_write(sctp->dtls_srtp, sctp->buf, length);
 #endif
 
@@ -1671,13 +1163,10 @@ int sctp_create_association(Sctp* sctp, DtlsSrtp* dtls_srtp) {
 void sctp_destroy_association(Sctp* sctp) {
 #if !CONFIG_USE_USRSCTP
   if (sctp != NULL) {
-    sctp_reset_receive(sctp, 0, 0);
-    free(sctp->sent_packet_pool);
-    sctp->sent_packet_pool = NULL;
-    sctp->sent_packets_tail = NULL;
-    sctp->sent_packets = NULL;
-    sctp->sent_packets_free = NULL;
-    sctp->sent_packet_count = 0;
+    sctp_clear_handshake(sctp);
+    sctp_rx_destroy(sctp);
+    sctp_tx_destroy(sctp);
+    sctp->connected = 0;
   }
 #endif
 #if CONFIG_USE_USRSCTP
@@ -1691,6 +1180,22 @@ void sctp_destroy_association(Sctp* sctp) {
 
 int sctp_is_connected(Sctp* sctp) {
   return sctp->connected;
+}
+
+void sctp_deinit(Sctp* sctp) {
+  sctp_destroy_association(sctp);
+#if !CONFIG_USE_USRSCTP
+  if (sctp && sctp->packets) {
+    /* Association callbacks may close RX while the peer still borrows input.
+     * Keep this pool across renegotiation; only final peer teardown frees it. */
+    if (net_buf_pool_deinit(sctp->packets) < 0) {
+      LOGE("SCTP packet pool still borrowed at final teardown");
+      return;
+    }
+    free(sctp->packets);
+    sctp->packets = NULL;
+  }
+#endif
 }
 
 void sctp_onmessage(Sctp* sctp, void (*onmessage)(char* msg, size_t len, void* userdata, uint16_t sid)) {

@@ -697,7 +697,7 @@ size_t net_buf_append_bytes(struct net_buf *buf, size_t len,
 	size_t max_size;
 
 	do {
-		uint16_t count = min(len, net_buf_tailroom(frag));
+		size_t count = min(len, net_buf_tailroom(frag));
 
 		net_buf_add_mem(frag, value8, count);
 		len -= count;
