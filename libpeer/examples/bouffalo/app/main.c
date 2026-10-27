@@ -19,7 +19,7 @@
 #ifdef CONFIG_BSP_LCD
 #include "app_ui.h"
 #endif
-#include "devices/drv_snd.h"
+#include "devices/drv_snd_bl616.h"
 #include "easyflash.h"
 #include "lfs_kv.h"
 #include "fhost_api.h"
@@ -434,7 +434,7 @@ static void system_init_task(void *argument)
         vTaskDelay(pdMS_TO_TICKS(100));
     }
 
-    snd_card_register(NULL);
+    snd_card_bl616_register(NULL);
     msp_i2s_port_init();
 
     read_signaling_config(signaling_url, signaling_token, ice_server_url,
